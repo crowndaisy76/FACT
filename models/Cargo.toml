@@ -7,3 +7,4 @@ edition = "2024"
 serde = { version = "1.0", features = ["derive"] }
 chrono = "0.4"
 thiserror = "2.0"
+binrw = "0.14" # 바이너리 데이터를 구조체로 매핑하기 위해 binrw 라이브러리를 models에도 적용한다.
