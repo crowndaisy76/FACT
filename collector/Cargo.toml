@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 models = { path = "../models" }
+parser = { path = "../parser" }
 windows = { version = "0.58", features = [
     "Win32_Foundation", 
     "Win32_System_ProcessStatus", 
@@ -12,3 +13,4 @@ windows = { version = "0.58", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem"
 ] }
+anyhow = "1.0"

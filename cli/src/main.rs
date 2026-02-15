@@ -1,75 +1,60 @@
 use anyhow::{Context, Result};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::Path;
 use windows::core::w;
 use collector::privilege::enable_privilege;
 use collector::reader::open_locked_file;
-use parser::ntfs::parse_boot_sector;
-use parser::mft::{parse_file_record_header, parse_attributes};
+use collector::mft::MftReader;
+use collector::artifacts::{ForensicCollector, ArtifactTarget};
 
 fn main() -> Result<()> {
-    // 1. 로깅 초기화
     tracing_subscriber::fmt::init();
     tracing::info!("FACT Engine Initiated.");
 
-    // 2. 권한 상승
-    tracing::info!("Requesting SeBackupPrivilege...");
-    enable_privilege(w!("SeBackupPrivilege"))
-        .context("Failed to acquire SeBackupPrivilege. Are you running as Administrator?")?;
-    tracing::info!("Privilege acquired successfully.");
-
-    // 3. Raw Volume 접근
+    enable_privilege(w!("SeBackupPrivilege"))?;
+    
     let volume_path = w!("\\\\.\\C:"); 
-    tracing::info!("Opening Raw Volume: \\\\.\\C:");
+    let file = open_locked_file(volume_path)?;
     
-    let mut file = open_locked_file(volume_path)
-        .context("Failed to open Raw Volume.")?;
+    tracing::info!("Bootstrapping MFT Reader...");
+    let mut mft_reader = MftReader::bootstrap(file)
+        .context("Failed to bootstrap MFT Engine")?;
     
-    // 4. VBR 파싱
-    let mut vbr_buffer = [0u8; 512];
-    file.read_exact(&mut vbr_buffer).context("Failed to read VBR.")?;
-    let vbr = parse_boot_sector(&vbr_buffer)
-        .context("Failed to parse NTFS Boot Sector.")?;
-    
-    let mft_offset = vbr.mft_offset();
-    tracing::info!("Calculated $MFT Offset: {} bytes", mft_offset);
+    let mut collector = ForensicCollector::new(mft_reader);
+    tracing::info!("Forensic Collector is ready.");
 
-    // 5. $MFT 위치로 이동 (Seek)
-    file.seek(SeekFrom::Start(mft_offset))
-        .context("Failed to seek to $MFT position.")?;
+    // 수집 대상
+    let targets = vec![
+        ArtifactTarget::LogFile,      
+        ArtifactTarget::RegistrySAM,
+        ArtifactTarget::RegistrySYSTEM,
+    ];
 
-    // 6. $MFT의 첫 번째 레코드(Entry 0) 읽기
-    let mut mft_buffer = [0u8; 1024];
-    file.read_exact(&mut mft_buffer).context("Failed to read MFT Entry 0.")?;
+    let output_dir = "output_artifacts";
+    if !Path::new(output_dir).exists() {
+        fs::create_dir(output_dir)?;
+    }
 
-    // 7. 파싱 및 검증
-    tracing::info!("Parsing MFT Entry 0 (Self-Reference)...");
-    let mft_header = parse_file_record_header(&mft_buffer)
-        .context("Failed to parse MFT Record.")?;
-
-    tracing::info!("MFT Entry 0 Analysis:");
-    tracing::info!("  - Signature: {}", mft_header.signature);
-    tracing::info!("  - Flags: {:#04X} (0x01=InUse, 0x02=Directory)", mft_header.flags);
-    tracing::info!("  - Used Size: {} bytes", mft_header.bytes_in_use);
-    tracing::info!("  - Allocated Size: {} bytes", mft_header.bytes_allocated);
-
-    if mft_header.signature == "FILE" {
-        tracing::info!("SUCCESS: Valid NTFS File Record Found!");
-
-        // [Step 6] 속성(Attribute) 순회 및 출력
-        tracing::info!("Parsing Attributes...");
-        let attributes = parse_attributes(&mft_buffer, &mft_header)
-            .context("Failed to parse MFT attributes.")?;
-
-        for (i, attr) in attributes.iter().enumerate() {
-            let residency = if attr.non_resident_flag == 0 { "Resident" } else { "Non-Resident" };
-            tracing::info!(
-                "  [Attr #{}] Type: {} | Length: {} | Storage: {}", 
-                i, attr, attr.length, residency
-            );
+    for target in targets {
+        tracing::info!("Collecting Artifact: {:?}", target);
+        
+        match collector.collect(target.clone()) {
+            Ok(data) => {
+                let filename = format!("{:?}.bin", target);
+                let path = Path::new(output_dir).join(filename);
+                let mut outfile = File::create(&path)?;
+                outfile.write_all(&data)?;
+                tracing::info!("  -> Success! Saved {} bytes to {:?}", data.len(), path);
+            },
+            Err(e) => {
+                tracing::error!("  -> Failed to collect {:?}: {}", target, e);
+                // [Debug] 경로 탐색 실패 시 힌트 제공
+                // 만약 RegistrySAM 실패라면, Windows 폴더가 있는지 Root를 뒤져본다.
+                // forensic_collector는 mft_reader의 소유권을 가져갔으므로 여기서 직접 reader 접근은 어렵지만,
+                // 에러 메시지를 통해 상황 파악 가능.
+            }
         }
-
-    } else {
-        tracing::error!("CRITICAL: Invalid Signature found. Expected 'FILE', got '{}'", mft_header.signature);
     }
 
     Ok(())

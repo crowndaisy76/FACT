@@ -229,7 +229,9 @@ dependencies = [
 name = "collector"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "models",
+ "parser",
  "windows",
 ]
 
