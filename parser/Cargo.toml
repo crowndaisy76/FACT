@@ -1,0 +1,9 @@
+[package]
+name = "parser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+models = { path = "../models" }
+nom = "7.1"
+binrw = "0.14"

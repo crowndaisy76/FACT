@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "models",
+    "collector",
+    "parser",
+    "analyzer",
+    "cli"
+]
+resolver = "2"
