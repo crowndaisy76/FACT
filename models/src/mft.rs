@@ -2,11 +2,9 @@ use binrw::BinRead;
 use std::fmt;
 use chrono::{DateTime, Utc, TimeZone};
 
-/// NTFS MFT File Record Header
-#[derive(BinRead, Debug, Clone)]
-#[br(little)]
+// [Fix] 패딩 및 정렬 에러 방지를 위해 핵심 헤더에서 BinRead 제거
+#[derive(Debug, Clone)]
 pub struct FileRecordHeader {
-    #[br(map = |x: [u8; 4]| String::from_utf8_lossy(&x).to_string())]
     pub signature: String, 
     pub usa_offset: u16,
     pub usa_count: u16,
@@ -21,9 +19,7 @@ pub struct FileRecordHeader {
     pub next_attr_id: u16,
 }
 
-/// NTFS Attribute Common Header
-#[derive(BinRead, Debug, Clone)]
-#[br(little)]
+#[derive(Debug, Clone)]
 pub struct AttributeHeader {
     pub type_code: u32,
     pub length: u32,
@@ -32,30 +28,26 @@ pub struct AttributeHeader {
     pub name_offset: u16,
     pub flags: u16,
     pub attribute_id: u16,
+    pub offset: usize, // [Fix] 속성의 절대 오프셋 보장
 }
 
-/// Non-Resident Attribute Header
-#[derive(BinRead, Debug, Clone)]
-#[br(little)]
+#[derive(Debug, Clone)]
 pub struct NonResidentAttributeHeader {
     pub starting_vcn: u64,
     pub last_vcn: u64,
     pub run_array_offset: u16,
     pub compression_unit: u16,
-    #[br(pad_before = 4)] 
     pub allocated_size: u64,
     pub real_size: u64,
     pub initialized_size: u64,
 }
 
-/// Runlist Data
 #[derive(Debug, Clone)]
 pub struct DataRun {
     pub start_lcn: u64,
     pub length: u64,
 }
 
-/// $STANDARD_INFORMATION (0x10)
 #[derive(BinRead, Debug, Clone)]
 #[br(little)]
 pub struct StandardInformation {
@@ -83,7 +75,6 @@ impl StandardInformation {
     }
 }
 
-/// $FILE_NAME (0x30)
 #[derive(Debug, Clone)]
 pub struct FileNameAttribute {
     pub parent_directory: u64,
@@ -99,51 +90,48 @@ pub struct FileNameAttribute {
     pub name: String,
 }
 
-/// Index Header (Node Header) - Directory Entry 공통 헤더
 #[derive(BinRead, Debug, Clone)]
 #[br(little)]
 pub struct IndexHeader {
-    pub first_entry_offset: u32,  // 첫 번째 엔트리 위치
-    pub total_size_of_entries: u32, // 전체 엔트리 크기
-    pub allocated_size: u32,      // 할당된 크기
-    pub flags: u8,                // 0x00=Small(Leaf), 0x01=Large(Node)
-    #[br(pad_before = 3)]         // Padding
+    pub first_entry_offset: u32,
+    pub total_size_of_entries: u32,
+    pub allocated_size: u32,
+    pub flags: u8,
+    #[br(pad_before = 3)]
     pub _padding: (),
 }
 
-/// $INDEX_ROOT (0x90) Attribute Header
 #[derive(BinRead, Debug, Clone)]
 #[br(little)]
 pub struct IndexRootAttribute {
-    pub attribute_type: u32,      // 보통 0x30 ($FILE_NAME)
+    pub attribute_type: u32,
     pub collation_rule: u32,
     pub index_allocation_size: u32,
     pub clusters_per_index_record: u8,
     #[br(pad_before = 3)]
-    pub header: IndexHeader,      // 내부에 IndexHeader 포함
+    pub header: IndexHeader,
 }
 
-/// Index Entry (디렉토리 내부 파일 정보)
 #[derive(Debug, Clone)]
 pub struct IndexEntry {
-    pub file_reference: u64,      // 자식 파일의 MFT 번호
-    pub length: u16,              // 엔트리 전체 길이
+    pub file_reference: u64,
+    pub length: u16,
     pub stream_length: u16,
-    pub flags: u8,                // 0x02=Last Entry
-    pub filename: String,         // 파일 이름
+    pub flags: u8,
+    pub filename: String,
+    pub is_directory: bool, // [Fix] 디렉토리 식별자 완벽 분리
 }
 
-/// [Step 16 추가] Index Record Header ("INDX" 4KB Block Header)
 #[derive(BinRead, Debug, Clone)]
 #[br(little)]
 pub struct IndexRecordHeader {
     #[br(map = |x: [u8; 4]| String::from_utf8_lossy(&x).to_string())]
-    pub signature: String, // "INDX"
+    pub signature: String,
     pub usa_offset: u16,
     pub usa_count: u16,
     pub lsn: u64,
-    pub vcn: u64,          // 이 블록의 가상 클러스터 번호
-    pub header: IndexHeader, // 내부에 Node Header 포함
+    pub vcn: u64,
+    pub header: IndexHeader,
 }
 
 impl fmt::Display for AttributeHeader {
