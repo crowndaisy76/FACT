@@ -1,19 +1,30 @@
-use chrono::{DateTime, Utc};
-use crate::error::FactError;
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArtifactTarget {
+    MFT, LogFile, Amcache,
+    RegistrySAM, RegistrySECURITY, RegistrySOFTWARE, RegistrySYSTEM,
+    Prefetch, EventLogs, ScheduledTasks, RecycleBin, USBLog
+}
 
-/// 모든 포렌식 아티팩트 파서가 반드시 구현해야 하는 표준 인터페이스
-pub trait Artifact {
-    /// 아티팩트의 고유 분류명 반환 (예: "Prefetch", "USN_Journal")
-    fn name(&self) -> &str;
-    
-    /// 아티팩트에서 추출된 핵심 타임스탬프 (UTC 기준)
-    /// (Timeline 정렬의 기준값이 됨)
-    fn timestamp(&self) -> DateTime<Utc>;
-    
-    /// 프로세스 ID (PID) 매핑이 가능한 경우 반환
-    /// (메모리, 네트워크 이벤트 등에서 논리적 상관관계 추론 시 사용)
-    fn pid(&self) -> Option<u32>;
-    
-    /// 분석된 결과를 STIX 2.1 JSON 규격의 문자열로 변환
-    fn to_stix(&self) -> Result<String, FactError>;
+pub enum TargetType {
+    SingleFile { path: &'static str },
+    Directory { path: &'static str, extension: Option<&'static str>, recursive: bool },
+}
+
+impl ArtifactTarget {
+    pub fn get_details(&self) -> Vec<TargetType> {
+        match self {
+            Self::MFT => vec![TargetType::SingleFile { path: "$MFT" }],
+            Self::LogFile => vec![TargetType::SingleFile { path: "$LogFile" }],
+            Self::RegistrySAM => vec![TargetType::SingleFile { path: "Windows\\System32\\config\\SAM" }],
+            Self::RegistrySECURITY => vec![TargetType::SingleFile { path: "Windows\\System32\\config\\SECURITY" }],
+            Self::RegistrySOFTWARE => vec![TargetType::SingleFile { path: "Windows\\System32\\config\\SOFTWARE" }],
+            Self::RegistrySYSTEM => vec![TargetType::SingleFile { path: "Windows\\System32\\config\\SYSTEM" }],
+            Self::Amcache => vec![TargetType::SingleFile { path: "Windows\\AppCompat\\Programs\\Amcache.hve" }],
+            Self::Prefetch => vec![TargetType::Directory { path: "Windows\\Prefetch", extension: Some("pf"), recursive: false }],
+            Self::EventLogs => vec![TargetType::Directory { path: "Windows\\System32\\winevt\\Logs", extension: Some("evtx"), recursive: false }],
+            Self::USBLog => vec![TargetType::SingleFile { path: "Windows\\inf\\setupapi.dev.log" }],
+            Self::ScheduledTasks => vec![TargetType::Directory { path: "Windows\\System32\\Tasks", extension: None, recursive: true }],
+            Self::RecycleBin => vec![TargetType::Directory { path: "$Recycle.Bin", extension: None, recursive: true }],
+        }
+    }
 }

@@ -160,16 +160,15 @@ impl MftReader {
             if run.start_lcn != u64::MAX {
                 if let Some(phys_off) = run.start_lcn.checked_mul(cluster_size) {
                     self.file.seek(SeekFrom::Start(phys_off))?;
-                    // [BINGO] Sector Alignment 적용
                     let aligned_size = ((size + cluster_size - 1) / cluster_size) * cluster_size;
                     let mut chunk = vec![0u8; aligned_size as usize];
-                    let _ = self.file.read_exact(&mut chunk); // 에러 무시하고 읽힌 만큼 쓴다
+                    let _ = self.file.read_exact(&mut chunk);
                     
                     chunk.truncate(size as usize);
                     buffer.extend(chunk);
                 }
             } else {
-                buffer.extend(vec![0u8; size as usize]); // Sparse 구역
+                buffer.extend(vec![0u8; size as usize]);
             }
             total_read += size;
         }
@@ -190,12 +189,12 @@ impl MftReader {
             }
 
             let run_bytes = run.length.checked_mul(cluster_size).context("Runlist overflow")?;
-            let mut run_remaining = std::cmp::min(run_bytes, max_size - total_written);
+            // [Fix] mut 키워드 제거
+            let run_remaining = std::cmp::min(run_bytes, max_size - total_written);
             let phys_off = run.start_lcn.checked_mul(cluster_size).context("LCN overflow")?;
             
             self.file.seek(SeekFrom::Start(phys_off))?;
 
-            // [Ultimate Fix] 라이브 디스크 I/O 에러 87(Invalid Parameter) 방지를 위한 섹터 정렬 청크 읽기
             let clusters_to_read = (run_remaining + cluster_size - 1) / cluster_size;
             let aligned_read_size = clusters_to_read * cluster_size;
             const MAX_CHUNK: u64 = 4 * 1024 * 1024;
@@ -208,7 +207,6 @@ impl MftReader {
                 let current_aligned_read = std::cmp::min(MAX_CHUNK, aligned_remaining);
                 let slice = &mut buffer[..current_aligned_read as usize];
                 
-                // 섹터 배수로 정확히 읽음. 실패 시 에러 전파하여 원인 파악
                 self.file.read_exact(slice).context("Sector-aligned Block I/O Error")?;
 
                 let current_exact_write = std::cmp::min(current_aligned_read, exact_remaining);

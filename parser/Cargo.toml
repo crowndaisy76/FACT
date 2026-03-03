@@ -7,3 +7,5 @@ edition = "2024"
 models = { path = "../models" }
 nom = "7.1"
 binrw = "0.14"
+anyhow = "1.0"
+chrono = "0.4"

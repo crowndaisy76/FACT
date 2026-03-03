@@ -5,4 +5,7 @@ edition = "2024"
 
 [dependencies]
 models = { path = "../models" }
-rusqlite = { version = "0.32", features = ["bundled"] }
+parser = { path = "../parser" }
+anyhow = "1.0"
+chrono = "0.4"
+tracing = "0.1"
