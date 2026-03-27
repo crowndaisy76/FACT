@@ -1,6 +1,6 @@
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactTarget {
-    MFT, LogFile, Amcache,
+    MFT, LogFile, UsnJrnl, Amcache,
     RegistrySAM, RegistrySECURITY, RegistrySOFTWARE, RegistrySYSTEM,
     Prefetch, EventLogs, ScheduledTasks, RecycleBin, USBLog
 }
@@ -15,6 +15,8 @@ impl ArtifactTarget {
         match self {
             Self::MFT => vec![TargetType::SingleFile { path: "$MFT" }],
             Self::LogFile => vec![TargetType::SingleFile { path: "$LogFile" }],
+            // [Fix] 기본 스트림이 아닌 $J 스트림(ADS)을 타격하도록 경로 명시
+            Self::UsnJrnl => vec![TargetType::SingleFile { path: "$Extend\\$UsnJrnl:$J" }],
             Self::RegistrySAM => vec![TargetType::SingleFile { path: "Windows\\System32\\config\\SAM" }],
             Self::RegistrySECURITY => vec![TargetType::SingleFile { path: "Windows\\System32\\config\\SECURITY" }],
             Self::RegistrySOFTWARE => vec![TargetType::SingleFile { path: "Windows\\System32\\config\\SOFTWARE" }],

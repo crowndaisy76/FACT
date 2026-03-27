@@ -7,9 +7,13 @@ use collector::filesystem::NtfsFileSystem;
 use collector::artifacts::ForensicCollector;
 use models::artifact::ArtifactTarget;
 use analyzer::AnalysisEngine;
+use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new("info,evtx=warn"))
+        .init();
+
     tracing::info!("FACT Engine Initiated - In-Memory Analysis Pipeline Active.");
 
     enable_privilege(w!("SeBackupPrivilege"))?;
@@ -25,10 +29,7 @@ fn main() -> Result<()> {
     tracing::info!("Analysis Engine is ready.");
 
     let targets = vec![
-        ArtifactTarget::Prefetch,
-        ArtifactTarget::RegistrySAM,
-        ArtifactTarget::RegistrySOFTWARE, 
-        ArtifactTarget::RegistrySYSTEM, 
+        ArtifactTarget::ScheduledTasks, // [Step 9 Target ON]
     ];
 
     for target in targets {
@@ -44,18 +45,27 @@ fn main() -> Result<()> {
             for event in &events {
                 match event {
                     models::event::ForensicEvent::Execution(e) => {
-                        println!("[EXECUTION] {} | Process: {} | Runs: {} | Source: {}", 
-                            e.timestamp.format("%Y-%m-%d %H:%M:%S UTC"), e.process_name, e.run_count, e.file_path);
+                        println!("[EXECUTION] {} | Process: {} | Cmd/Path: {}", 
+                            e.timestamp.format("%Y-%m-%d %H:%M:%S UTC"), e.process_name, e.file_path);
                     },
                     models::event::ForensicEvent::Persistence(p) => {
+                        // 추출된 XML 페이로드가 이곳에서 출력됩니다.
                         println!("[PERSISTENCE] {} | Type: {} | Name: {} | Payload: {}", 
                             p.timestamp.format("%Y-%m-%d %H:%M:%S UTC"), p.persistence_type, p.target_name, p.target_path);
+                    },
+                    models::event::ForensicEvent::Logon(l) => {
+                        println!("[LOGON] {} | EventID: {} | Status: {} | Type: {} | Account: {} | IP: {}", 
+                            l.timestamp.format("%Y-%m-%d %H:%M:%S UTC"), l.event_id, l.status, l.logon_type, l.account_name, l.source_ip.as_deref().unwrap_or("N/A"));
                     },
                     models::event::ForensicEvent::SystemActivity(s) => {
                         println!("[SYSTEM] {} | Type: {} | Desc: {} | Source: {}", 
                             s.timestamp.format("%Y-%m-%d %H:%M:%S UTC"), s.activity_type, s.description, s.source_artifact);
                     },
-                    _ => {}
+                    models::event::ForensicEvent::FileSystemActivity(f) => {
+                        let f_type = if f.is_dir { "DIR " } else { "FILE" };
+                        println!("[FILE_SYSTEM] {} | [{}] {} | Action: {}", 
+                            f.timestamp.format("%Y-%m-%d %H:%M:%S UTC"), f_type, f.file_name, f.reason);
+                    },
                 }
             }
             total_events += events.len();

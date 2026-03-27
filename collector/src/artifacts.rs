@@ -3,7 +3,6 @@ use anyhow::{Result, bail};
 use parser::mft::{parse_file_record_header, parse_attributes, parse_non_resident_header, parse_runlist};
 use std::collections::HashSet;
 use std::io::{Write, Cursor};
-// [New] models 크레이트에서 공통 타겟 모델을 가져온다.
 use models::artifact::{ArtifactTarget, TargetType};
 
 pub struct ForensicCollector<'a> { 
@@ -23,13 +22,18 @@ impl<'a> ForensicCollector<'a> {
         for detail in target.get_details() {
             match detail {
                 TargetType::SingleFile { path } => {
-                    if let Ok(inode) = self.fs.get_inode_by_path(path) {
-                        let file_name = path.split('\\').last().unwrap();
-                        
+                    // [Fix] ADS(대체 데이터 스트림) 식별자 분리 로직 추가
+                    let parts: Vec<&str> = path.split(':').collect();
+                    let file_path = parts[0]; // 순수 경로 (예: $Extend\$UsnJrnl)
+                    let requested_ads = if parts.len() > 1 { parts[1] } else { "" }; // ADS 이름 (예: $J)
+                    let file_name = file_path.split('\\').last().unwrap();
+                    
+                    if let Ok(inode) = self.fs.get_inode_by_path(file_path) {
                         let mut buffer = Vec::new();
                         let mut virtual_sink = Cursor::new(&mut buffer);
                         
-                        match self.extract_comprehensive_data(inode, &mut virtual_sink) {
+                        // [Fix] requested_ads를 주입하여 해당 데이터 스트림을 낚아챔
+                        match self.extract_comprehensive_data(inode, requested_ads, &mut virtual_sink) {
                             Ok(written) => {
                                 if written > 0 {
                                     callback(file_name, &buffer);
@@ -81,7 +85,8 @@ impl<'a> ForensicCollector<'a> {
                                         let mut buffer = Vec::new();
                                         let mut virtual_sink = Cursor::new(&mut buffer);
                                         
-                                        if let Ok(written) = self.extract_comprehensive_data(entry.file_reference, &mut virtual_sink) {
+                                        // 디렉터리 스캔 시에는 기본 스트림("")을 타격
+                                        if let Ok(written) = self.extract_comprehensive_data(entry.file_reference, "", &mut virtual_sink) {
                                             if written > 0 { 
                                                 callback(&s_name, &buffer);
                                                 processed_count += 1;
@@ -99,7 +104,8 @@ impl<'a> ForensicCollector<'a> {
         Ok((processed_count, total_bytes_streamed))
     }
 
-    fn extract_comprehensive_data(&mut self, base_index: u64, writer: &mut dyn Write) -> Result<u64> {
+    // [Fix] 파라미터에 requested_ads 추가
+    fn extract_comprehensive_data(&mut self, base_index: u64, requested_ads: &str, writer: &mut dyn Write) -> Result<u64> {
         let mut inodes = vec![base_index];
         let mut total_written: u64 = 0;
         
@@ -140,21 +146,25 @@ impl<'a> ForensicCollector<'a> {
             }
         }
 
-        let mut target_ads = "";
-        for &inode in &inodes {
-            if let Ok(r) = self.fs.mft.read_record(inode) {
-                if let Ok(h) = parse_file_record_header(&r) {
-                    let inode_attrs = parse_attributes(&r, &h).unwrap_or_default();
-                    for attr in inode_attrs {
-                        if attr.type_code == 0x80 && attr.name_length > 0 {
-                            let ns = attr.offset + attr.name_offset as usize;
-                            let end = std::cmp::min(ns + (attr.name_length as usize * 2), r.len());
-                            if ns <= end {
-                                if let Some(nb) = r.get(ns..end) {
-                                    let u16v: Vec<u16> = nb.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-                                    let name = String::from_utf16_lossy(&u16v);
-                                    if name.eq_ignore_ascii_case("WofCompressedData") {
-                                        target_ads = "WofCompressedData";
+        let mut target_ads = requested_ads.to_string();
+
+        // 특정 ADS 요청이 없으면 기존처럼 WofCompressedData 우선 탐색
+        if target_ads.is_empty() {
+            for &inode in &inodes {
+                if let Ok(r) = self.fs.mft.read_record(inode) {
+                    if let Ok(h) = parse_file_record_header(&r) {
+                        let inode_attrs = parse_attributes(&r, &h).unwrap_or_default();
+                        for attr in inode_attrs {
+                            if attr.type_code == 0x80 && attr.name_length > 0 {
+                                let ns = attr.offset + attr.name_offset as usize;
+                                let end = std::cmp::min(ns + (attr.name_length as usize * 2), r.len());
+                                if ns <= end {
+                                    if let Some(nb) = r.get(ns..end) {
+                                        let u16v: Vec<u16> = nb.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                                        let name = String::from_utf16_lossy(&u16v);
+                                        if name.eq_ignore_ascii_case("WofCompressedData") {
+                                            target_ads = "WofCompressedData".to_string();
+                                        }
                                     }
                                 }
                             }
@@ -185,7 +195,8 @@ impl<'a> ForensicCollector<'a> {
                         }
                     }
                     
-                    if name.eq_ignore_ascii_case(target_ads) {
+                    // [Fix] 요청한 스트림 이름(예: $J)과 정확히 매칭될 때만 데이터를 추출
+                    if name.eq_ignore_ascii_case(&target_ads) {
                         data_attr_found = true;
                         
                         if attr.non_resident_flag == 0 {
@@ -222,7 +233,7 @@ impl<'a> ForensicCollector<'a> {
         }
 
         if !data_attr_found {
-            bail!("Missing $DATA attribute");
+            bail!("Missing $DATA attribute for requested ADS: {}", target_ads);
         }
         
         Ok(total_written)

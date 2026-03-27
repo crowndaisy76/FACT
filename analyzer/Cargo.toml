@@ -9,3 +9,5 @@ parser = { path = "../parser" }
 anyhow = "1.0"
 chrono = "0.4"
 tracing = "0.1"
+evtx = "0.11.2"
+serde_json = "1.0.149"

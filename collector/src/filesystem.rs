@@ -112,7 +112,9 @@ impl<'a> NtfsFileSystem<'a> {
     }
 
     pub fn get_inode_by_path(&mut self, path: &str) -> Result<u64> {
-        let parts: Vec<&str> = path.split('\\').filter(|p| !p.is_empty()).collect();
+        // [Fix] ADS 식별자 ':'가 포함되어 있다면 순수 파일명만 분리
+        let clean_path = path.split(':').next().unwrap_or(path);
+        let parts: Vec<&str> = clean_path.split('\\').filter(|p| !p.is_empty()).collect();
         let mut cur = 5;
         
         for (i, part) in parts.iter().enumerate() {

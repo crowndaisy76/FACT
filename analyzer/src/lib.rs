@@ -1,11 +1,19 @@
 pub mod prefetch;
 pub mod registry;
+pub mod evtx;
+pub mod usnjrnl;
+pub mod amcache;
+pub mod tasks; // [New]
 
 use anyhow::Result;
 use models::event::ForensicEvent;
 use models::artifact::ArtifactTarget;
 use prefetch::PrefetchAnalyzer;
 use registry::RegistryAnalyzer;
+use evtx::EvtxAnalyzer;
+use usnjrnl::UsnJrnlAnalyzer;
+use amcache::AmcacheAnalyzer;
+use tasks::TasksAnalyzer; // [New]
 
 pub trait ArtifactAnalyzer {
     fn analyze(&self, filename: &str, data: &[u8]) -> Result<Vec<ForensicEvent>>;
@@ -21,6 +29,10 @@ impl AnalysisEngine {
         let mut analyzers: Vec<Box<dyn ArtifactAnalyzer>> = Vec::new();
         analyzers.push(Box::new(PrefetchAnalyzer::new()));
         analyzers.push(Box::new(RegistryAnalyzer::new()));
+        analyzers.push(Box::new(EvtxAnalyzer::new()));
+        analyzers.push(Box::new(UsnJrnlAnalyzer::new()));
+        analyzers.push(Box::new(AmcacheAnalyzer::new()));
+        analyzers.push(Box::new(TasksAnalyzer::new())); // [New]
         Self { analyzers }
     }
 
