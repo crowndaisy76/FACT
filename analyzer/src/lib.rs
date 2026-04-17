@@ -4,8 +4,10 @@ pub mod evtx;
 pub mod usnjrnl;
 pub mod amcache;
 pub mod tasks;
+pub mod ntuser;
+pub mod preprocess; // [추가] 전처리기 모듈
 pub mod correlation;
-pub mod stix; // [New] STIX 모듈 추가
+pub mod stix;
 
 use anyhow::Result;
 use models::event::ForensicEvent;
@@ -15,10 +17,12 @@ use registry::RegistryAnalyzer;
 use evtx::EvtxAnalyzer;
 use usnjrnl::UsnJrnlAnalyzer;
 use amcache::AmcacheAnalyzer;
-use tasks::TasksAnalyzer;
+use tasks::TaskAnalyzer;
+use ntuser::NtUserAnalyzer;
 
+pub use preprocess::Preprocessor; // [추가]
 pub use correlation::{CorrelationEngine, TimelineEntry};
-pub use stix::StixBuilder; // [New] StixBuilder 외부 노출
+pub use stix::StixBuilder;
 
 pub trait ArtifactAnalyzer {
     fn analyze(&self, filename: &str, data: &[u8]) -> Result<Vec<ForensicEvent>>;
@@ -37,7 +41,8 @@ impl AnalysisEngine {
         analyzers.push(Box::new(EvtxAnalyzer::new()));
         analyzers.push(Box::new(UsnJrnlAnalyzer::new()));
         analyzers.push(Box::new(AmcacheAnalyzer::new()));
-        analyzers.push(Box::new(TasksAnalyzer::new()));
+        analyzers.push(Box::new(TaskAnalyzer::new()));
+        analyzers.push(Box::new(NtUserAnalyzer::new()));
         Self { analyzers }
     }
 

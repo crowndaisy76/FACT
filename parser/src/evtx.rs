@@ -1,59 +1,159 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
-use models::mft::StandardInformation;
+use chrono::{Utc, NaiveDateTime};
+use evtx::EvtxParser;
+use serde_json::Value;
+use std::io::Cursor;
+use models::event::{ForensicEvent, ExecutionEvent, NetworkEvent, SystemEvent};
 
-#[derive(Debug, Clone)]
-pub struct EvtxRecord {
-    pub record_id: u64,
-    pub timestamp: DateTime<Utc>,
-    // 향후 BinXML 디코딩을 위한 원본 페이로드
-    pub raw_data: Vec<u8>, 
-}
+pub fn parse_security_evtx_buffer(data: &[u8], filename: &str) -> Result<Vec<ForensicEvent>> {
+    let cursor = Cursor::new(data.to_vec());
+    let mut parser = EvtxParser::from_read_seek(cursor)?;
+    let mut events = Vec::new();
 
-/// EVTX 바이너리 스트림에서 '**\x00\x00' 시그니처를 스캔하여 레코드를 카빙한다.
-pub fn parse_evtx_stream(data: &[u8]) -> Result<Vec<EvtxRecord>> {
-    let mut records = Vec::new();
-    let mut offset = 0;
+    for record in parser.records_json() {
+        if let Ok(r) = record {
+            let v: Option<Value> = serde_json::from_str(&r.data).ok();
+            if let Some(json_val) = v {
+                let event_id = json_val.pointer("/Event/System/EventID").and_then(|id| id.as_u64()).unwrap_or(0) as u32;
+                
+                // 1. 실행 이벤트 파싱 (EID 4688, Sysmon 1)
+                if event_id == 4688 || event_id == 1 {
+                    if let Some(event) = extract_execution_data(&json_val, filename) {
+                        events.push(event);
+                    }
+                }
+                
+                // 2. 네트워크 연결 이벤트 파싱 (WFP EID 5156, Sysmon 3)
+                else if event_id == 5156 || event_id == 3 {
+                    if let Some(event) = extract_network_data(&json_val, filename, event_id) {
+                        events.push(event);
+                    }
+                }
 
-    // EVTX 파일 헤더(4096바이트)를 건너뛰고 청크(Chunk) 영역부터 스캔 시작
-    if data.len() > 4096 {
-        offset = 4096;
-    }
-
-    while offset + 24 <= data.len() {
-        // [핵심] EVTX Record Magic Number: "**\x00\x00" (0x2A 0x2A 0x00 0x00)
-        if data[offset] == 0x2A && data[offset+1] == 0x2A && data[offset+2] == 0x00 && data[offset+3] == 0x00 {
-            
-            // 레코드 전체 크기 (4 bytes)
-            let size = u32::from_le_bytes(data[offset+4..offset+8].try_into().unwrap()) as usize;
-            if size < 24 || offset + size > data.len() {
-                offset += 1;
-                continue;
+                // 3. [추가] 방어 회피 및 안티포렌식 이벤트 파싱 (EID 1102, 104, 5001, 1116)
+                else if event_id == 1102 || event_id == 104 || event_id == 5001 || event_id == 1116 {
+                    if let Some(event) = extract_evasion_data(&json_val, filename, event_id) {
+                        events.push(event);
+                    }
+                }
             }
-
-            // 레코드 고유 ID (8 bytes)
-            let record_id = u64::from_le_bytes(data[offset+8..offset+16].try_into().unwrap());
-            
-            // 레코드 생성 시간 (8 bytes, FILETIME 포맷)
-            let filetime = u64::from_le_bytes(data[offset+16..offset+24].try_into().unwrap());
-            let timestamp = StandardInformation::to_datetime(filetime);
-
-            // 실제 BinXML 페이로드 추출
-            let raw_data = data[offset+24..offset+size].to_vec();
-
-            records.push(EvtxRecord {
-                record_id,
-                timestamp,
-                raw_data,
-            });
-
-            // 현재 레코드 크기만큼 점프
-            offset += size;
-        } else {
-            // 시그니처가 일치하지 않으면 1바이트씩 전진하며 카빙 (Carving)
-            offset += 1;
         }
     }
+    Ok(events)
+}
+
+fn extract_execution_data(v: &Value, filename: &str) -> Option<ForensicEvent> {
+    let timestamp_str = v.pointer("/Event/System/TimeCreated/SystemTime").and_then(|t| t.as_str())?;
+    let timestamp = NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%dT%H:%M:%S%.fZ")
+        .map(|dt| dt.and_utc()).unwrap_or_else(|_| Utc::now());
+
+    let event_data = v.pointer("/Event/EventData")?;
+    let process_name = extract_event_data_field(event_data, "NewProcessName")
+        .or_else(|| extract_event_data_field(event_data, "Image"))
+        .unwrap_or_else(|| "Unknown".to_string());
     
-    Ok(records)
+    let command_line = extract_event_data_field(event_data, "CommandLine").unwrap_or_default();
+    let parent_process_name = extract_event_data_field(event_data, "ParentProcessName")
+        .or_else(|| extract_event_data_field(event_data, "ParentImage"))
+        .unwrap_or_default();
+
+    Some(ForensicEvent::Execution(ExecutionEvent {
+        timestamp,
+        process_name: process_name.clone(),
+        file_path: process_name,
+        command_line,
+        parent_process_name,
+        run_count: 1,
+        referenced_files: Vec::new(),
+        source_artifact: filename.to_string(),
+    }))
+}
+
+fn extract_network_data(v: &Value, filename: &str, event_id: u32) -> Option<ForensicEvent> {
+    let timestamp_str = v.pointer("/Event/System/TimeCreated/SystemTime").and_then(|t| t.as_str())?;
+    let timestamp = NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%dT%H:%M:%S%.fZ")
+        .map(|dt| dt.and_utc()).unwrap_or_else(|_| Utc::now());
+
+    let event_data = v.pointer("/Event/EventData")?;
+    
+    let process_name = if event_id == 5156 {
+        extract_event_data_field(event_data, "Application").unwrap_or_else(|| "Unknown".to_string())
+    } else {
+        extract_event_data_field(event_data, "Image").unwrap_or_else(|| "Unknown".to_string())
+    };
+
+    let source_ip = extract_event_data_field(event_data, "SourceAddress")
+        .or_else(|| extract_event_data_field(event_data, "SourceIp"))
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+        
+    let dest_ip = extract_event_data_field(event_data, "DestAddress")
+        .or_else(|| extract_event_data_field(event_data, "DestinationIp"))
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+        
+    let source_port = extract_event_data_field(event_data, "SourcePort").unwrap_or_else(|| "0".to_string()).parse().unwrap_or(0);
+    let dest_port = extract_event_data_field(event_data, "DestPort")
+        .or_else(|| extract_event_data_field(event_data, "DestinationPort"))
+        .unwrap_or_else(|| "0".to_string()).parse().unwrap_or(0);
+        
+    let protocol = extract_event_data_field(event_data, "Protocol").unwrap_or_else(|| "Unknown".to_string());
+
+    if dest_ip == "127.0.0.1" || dest_ip == "::1" || dest_ip == "0.0.0.0" {
+        return None;
+    }
+
+    Some(ForensicEvent::NetworkActivity(NetworkEvent {
+        timestamp,
+        process_name,
+        source_ip,
+        source_port,
+        destination_ip: dest_ip,
+        destination_port: dest_port,
+        protocol,
+        source_artifact: format!("{} (EID: {})", filename, event_id),
+    }))
+}
+
+// [핵심 로직] 안티포렌식 및 방어 회피 탐지 추출
+fn extract_evasion_data(v: &Value, filename: &str, event_id: u32) -> Option<ForensicEvent> {
+    let timestamp_str = v.pointer("/Event/System/TimeCreated/SystemTime").and_then(|t| t.as_str())?;
+    let timestamp = NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%dT%H:%M:%S%.fZ")
+        .map(|dt| dt.and_utc()).unwrap_or_else(|_| Utc::now());
+
+    let (activity_type, description) = match event_id {
+        1102 | 104 => (
+            "Audit Log Cleared [CRITICAL]".to_string(),
+            "System or Security event log was cleared. Possible anti-forensics activity.".to_string()
+        ),
+        5001 => (
+            "Windows Defender Disabled [CRITICAL]".to_string(),
+            "Real-time protection was disabled.".to_string()
+        ),
+        1116 => (
+            "Malware Detection Alert".to_string(),
+            "Windows Defender detected malicious activity.".to_string()
+        ),
+        _ => ("Suspicious System Activity".to_string(), "Unknown evasion tactic.".to_string()),
+    };
+
+    Some(ForensicEvent::SystemActivity(SystemEvent {
+        timestamp,
+        activity_type,
+        description,
+        source_artifact: format!("{} (EID: {})", filename, event_id),
+    }))
+}
+
+fn extract_event_data_field(event_data: &Value, field_name: &str) -> Option<String> {
+    if let Value::Array(data_array) = event_data {
+        for item in data_array {
+            if item.get("Name").and_then(|n| n.as_str()) == Some(field_name) {
+                return item.get("#text").and_then(|t| t.as_str()).map(|s| s.to_string());
+            }
+        }
+    } else if let Value::Object(data_map) = event_data {
+        if let Some(val) = data_map.get(field_name) {
+             return val.as_str().map(|s| s.to_string());
+        }
+    }
+    None
 }

@@ -50,6 +50,9 @@ impl ArtifactAnalyzer for UsnJrnlAnalyzer {
                         file_name: rec.file_name,
                         reason: reasons,
                         is_dir,
+                        si_mtime: None,        // [추가] USN 저널은 SI/FN 상세 시간이 없으므로 None 처리
+                        fn_mtime: None,        // [추가]
+                        is_timestomped: false, // [추가]
                         source_artifact: "$Extend\\$UsnJrnl".to_string(),
                     }));
                 }

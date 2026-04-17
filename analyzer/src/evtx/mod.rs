@@ -4,7 +4,6 @@ use models::artifact::ArtifactTarget;
 use models::event::{ForensicEvent, LogonEvent, ExecutionEvent, PersistenceEvent, SystemEvent};
 use chrono::{DateTime, Utc};
 use evtx::EvtxParser;
-// [Fix] warning 제거: use serde_json::Value; 삭제
 
 pub struct EvtxAnalyzer;
 
@@ -72,7 +71,6 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                             let account = event_data["TargetUserName"].as_str().unwrap_or("Unknown");
                             let ip = event_data["IpAddress"].as_str().unwrap_or("-");
                             
-                            // [Fix] IP가 없거나 Unknown일 경우 None, 아니면 Some()으로 래핑
                             let source_ip = if ip == "-" || ip == "Unknown" { None } else { Some(ip.to_string()) };
 
                             if !account.ends_with('$') && account != "Unknown" {
@@ -81,7 +79,7 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                                     event_id: event_id as u32,
                                     account_name: account.to_string(),
                                     logon_type: logon_type.parse().unwrap_or(0),
-                                    source_ip, // 타입 에러 해결
+                                    source_ip,
                                     status: status.to_string(),
                                     source_artifact: filename.to_string(),
                                 }));
@@ -139,11 +137,14 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                     4688 => { 
                         let proc_name = event_data["NewProcessName"].as_str().unwrap_or("Unknown");
                         let cmd_line = event_data["CommandLine"].as_str().unwrap_or("Hidden");
+                        let parent_proc = event_data["ParentProcessName"].as_str().unwrap_or("Unknown"); // [추가] 부모 프로세스 추출
                         
                         events.push(ForensicEvent::Execution(ExecutionEvent {
                             timestamp,
                             process_name: proc_name.to_string(),
-                            file_path: cmd_line.to_string(),
+                            file_path: proc_name.to_string(), // [수정] 실행 파일 경로
+                            command_line: cmd_line.to_string(), // [추가] 커맨드라인 필드에 정확히 할당
+                            parent_process_name: parent_proc.to_string(), // [추가] 
                             run_count: 1,
                             referenced_files: vec![],
                             source_artifact: filename.to_string(),

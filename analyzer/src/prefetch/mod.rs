@@ -27,15 +27,17 @@ impl ArtifactAnalyzer for PrefetchAnalyzer {
                         timestamp,
                         process_name: info.executable_name.clone(),
                         file_path: filename.to_string(), 
+                        command_line: String::new(), // [추가] Prefetch는 커맨드라인을 제공하지 않으므로 빈 문자열
+                        parent_process_name: String::new(), // [추가] 부모 프로세스 정보 없음
                         run_count: info.run_count,
-                        referenced_files: vec![], 
+                        // [수정] 빈 배열이 아닌, 파서가 추출한 실제 참조 파일 목록을 매핑함
+                        referenced_files: info.referenced_files.clone(), 
                         source_artifact: "Prefetch".to_string(),
                     });
                     events.push(event);
                 }
             },
             Err(e) => {
-                // [Fix] 실패 사유를 명확히 확인하기 위해 warn 레벨로 상향
                 tracing::warn!("Failed to parse Prefetch {}: {}", filename, e);
             }
         }

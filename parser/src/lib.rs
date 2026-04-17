@@ -6,3 +6,7 @@ pub mod evtx;
 pub mod usnjrnl;
 pub mod amcache;
 pub mod tasks;
+pub mod ntuser;
+pub mod lnk;
+pub mod wmi;
+pub mod system_hive;
