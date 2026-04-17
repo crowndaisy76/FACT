@@ -6,11 +6,10 @@ edition = "2024"
 [dependencies]
 models = { path = "../models" }
 collector = { path = "../collector" }
-parser = { path = "../parser" }
 analyzer = { path = "../analyzer" }
-
-clap = { version = "4.5", features = ["derive"] }
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-windows = { version = "0.58", features = ["Win32_Foundation"] }
+# windows 버전을 0.58.0으로 상향하여 collector 크레이트(windows_strings 기반)와의 PCWSTR 타입 충돌을 해결한다.
+windows = { version = "0.58.0", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+serde_json = "1.0.149"
