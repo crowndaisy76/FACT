@@ -1,84 +1,40 @@
-use models::event::ForensicEvent;
+use models::event::{ForensicEvent, ExecutionEvent};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 pub struct Preprocessor;
 
 impl Preprocessor {
-    pub fn run(events: Vec<ForensicEvent>) -> Vec<ForensicEvent> {
-        let mut processed = Vec::new();
-        
-        for mut event in events {
-            if Self::is_noise(&event) {
-                continue;
+    pub fn run(mut events: Vec<ForensicEvent>) -> Vec<ForensicEvent> {
+        for event in &mut events {
+            if let ForensicEvent::Execution(e) = event {
+                Self::decode_powershell_enc(e);
             }
-            
-            Self::detect_anomalies(&mut event);
-            
-            processed.push(event);
         }
+        events
+    }
+
+    // PowerShell Base64(UTF-16LE) 인코딩 명령어 복호화 로직
+    fn decode_powershell_enc(e: &mut ExecutionEvent) {
+        let cmd = &e.command_line;
+        let lower_cmd = cmd.to_lowercase();
         
-        processed
-    }
-
-    fn is_noise(event: &ForensicEvent) -> bool {
-        match event {
-            ForensicEvent::Execution(e) => {
-                let name = e.process_name.to_lowercase();
-                
-                // 1. 윈도우 정상 백그라운드 프로세스 화이트리스트
-                let noise_procs = [
-                    "tiworker.exe", "searchindexer.exe", "compattelrunner.exe", 
-                    "backgroundtaskhost.exe", "mscorsvw.exe", "ngentask.exe",
-                    "devicecensus.exe", "sppsvc.exe", "onedrive.exe", "dllhost.exe",
-                    "taskhostw.exe", "conhost.exe", "wuaucltcore.exe", "runtimebroker.exe",
-                    "smartscreen.exe", "ctfmon.exe", "audiodg.exe"
-                ];
-                
-                if noise_procs.contains(&name.as_str()) {
-                    return true;
-                }
-                
-                if name == "svchost.exe" && !e.command_line.to_lowercase().contains("bypass") {
-                    return true;
-                }
-            },
-            ForensicEvent::FileSystemActivity(f) => {
-                let name = f.file_name.to_lowercase();
-                
-                // 2. 임시 파일 및 캐시 파일 확장자 무시
-                if name.ends_with(".tmp") || name.ends_with(".cache") || 
-                   name.ends_with(".etl") || name.ends_with(".wer") ||
-                   name.ends_with(".db") || name.ends_with(".db-wal") || 
-                   name.ends_with(".db-shm") || name.ends_with(".pf") ||
-                   name.ends_with(".mum") || name.ends_with(".cat") ||
-                   name.ends_with(".mui") || name.ends_with(".dat") ||
-                   name.ends_with(".log") || name.ends_with(".chk") ||
-                   name.ends_with(".ttf") || name.ends_with(".json") {
-                    return true;
-                }
-
-                // 3. 파일명에 물결표(~)가 들어간 백업/임시 파일 무시
-                if name.starts_with('~') || name.contains("~rf") || name.contains("~df") {
-                    return true;
-                }
-
-                // 4. MFT/USN에서 올라오는 특정 노이즈 문자열 무시
-                if name.contains("network persistent state") || name.contains("metrics.csv") || name.starts_with("ntuser") {
-                    return true;
-                }
-            },
-            _ => {}
-        }
-        false
-    }
-
-    fn detect_anomalies(event: &mut ForensicEvent) {
-        if let ForensicEvent::FileSystemActivity(f) = event {
-            if let (Some(si), Some(fn_time)) = (f.si_mtime, f.fn_mtime) {
-                let diff_seconds = fn_time.signed_duration_since(si).num_seconds();
-                
-                if diff_seconds > 3600 {
-                    f.is_timestomped = true;
-                    f.reason = format!("{} [CRITICAL: TIMESTOMPING DETECTED! SI-FN Delta: {}s]", f.reason, diff_seconds);
+        if lower_cmd.contains("-enc") || lower_cmd.contains("-encodedcommand") {
+            let parts: Vec<&str> = cmd.split_whitespace().collect();
+            if let Some(pos) = parts.iter().position(|&p| p.to_lowercase().starts_with("-enc")) {
+                if pos + 1 < parts.len() {
+                    let b64_str = parts[pos + 1];
+                    if let Ok(decoded_bytes) = STANDARD.decode(b64_str) {
+                        // PowerShell은 기본적으로 UTF-16LE 규격을 사용함
+                        let u16_data: Vec<u16> = decoded_bytes
+                            .chunks_exact(2)
+                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                            .collect();
+                        
+                        if let Ok(decoded_str) = String::from_utf16(&u16_data) {
+                            // 원본 로그 뒤에 복호화된 평문을 덧붙여 상관분석기로 넘김
+                            e.command_line = format!("{} [DECODED: {}]", cmd, decoded_str);
+                        }
+                    }
                 }
             }
         }

@@ -64,6 +64,7 @@ impl CorrelationEngine {
 
     pub fn ingest(&mut self, raw_events: Vec<ForensicEvent>) {
         let mut counter = 0;
+        
         for event in raw_events {
             let (score, category, summary, entities) = self.extract_context_and_score(&event);
             if score == 0 && entities.is_empty() { continue; }
@@ -101,12 +102,38 @@ impl CorrelationEngine {
         match event {
             ForensicEvent::Execution(e) => {
                 let filename = e.process_name.split('\\').last().unwrap_or(&e.process_name).to_lowercase();
-                if !filename.is_empty() && filename != "unknown" { entities.push(filename.clone()); }
+                let parent_name = e.parent_process_name.split('\\').last().unwrap_or(&e.parent_process_name).to_lowercase();
+
+                if !filename.is_empty() { entities.push(filename.clone()); }
+
+                let suspicious_parents = ["winword.exe", "excel.exe", "powerpnt.exe", "wscript.exe", "cscript.exe", "mshta.exe"];
+                let shells = ["cmd.exe", "powershell.exe", "pwsh.exe"];
+                
+                if shells.contains(&filename.as_str()) && suspicious_parents.contains(&parent_name.as_str()) {
+                    score += 150;
+                }
+                
+                if filename == "lsass.exe" && parent_name != "wininit.exe" && !parent_name.is_empty() {
+                    score += 200; 
+                }
+                if filename == "svchost.exe" && parent_name != "services.exe" && !parent_name.is_empty() {
+                    score += 150; 
+                }
+
                 let cmd_lower = e.command_line.to_lowercase();
+                
+                for token in cmd_lower.split_whitespace() {
+                    let clean_token = token.trim_matches(|c| c == '\'' || c == '"' || c == '\\' || c == ']' || c == '[');
+                    if clean_token.ends_with(".exe") || clean_token.ends_with(".ps1") || clean_token.ends_with(".dll") {
+                        let extracted = clean_token.split('\\').last().unwrap_or(clean_token).to_string();
+                        if !extracted.is_empty() { entities.push(extracted); }
+                    }
+                }
+
                 if e.source_artifact.starts_with("LNK") { score += 40; entities.push("lnk_execution".into()); }
                 if cmd_lower.contains("-enc") || cmd_lower.contains("hidden") || cmd_lower.contains("bypass") || cmd_lower.contains("download") { score += 50; }
                 if score == 0 { score += 5; }
-                (score, "Execution".into(), format!("Run: {}", filename), entities)
+                (score, "Execution".into(), format!("Run: {} (Parent: {})", filename, parent_name), entities)
             },
             ForensicEvent::FileSystemActivity(f) => {
                 let filename = f.file_name.split('\\').last().unwrap_or(&f.file_name).to_lowercase();
@@ -147,7 +174,7 @@ impl CorrelationEngine {
 
     pub fn analyze_multi_hop_causality(&mut self) {
         let mut rels = Vec::new();
-        let cluster_window = Duration::minutes(30).num_seconds(); 
+        let default_window = Duration::minutes(30).num_seconds(); 
 
         let mut id_to_event = HashMap::new();
         for e in &self.events {
@@ -159,7 +186,8 @@ impl CorrelationEngine {
             
             for entity in &src.entities {
                 if let Some(related_ids) = self.entity_index.get(entity) {
-                    if related_ids.len() > 500 { continue; }
+                    // 조합 폭발의 원흉인 다빈도 엔티티(50회 초과)는 연산에서 완전히 배제한다.
+                    if related_ids.len() > 50 { continue; }
 
                     for target_id in related_ids {
                         if target_id == &src.id { continue; }
@@ -170,19 +198,40 @@ impl CorrelationEngine {
                         };
 
                         let delta = (tgt.timestamp - src.timestamp).num_seconds().abs();
-                        if delta > cluster_window { continue; }
+                        if delta > default_window { continue; }
 
-                        let mut rel_type = "related_to".to_string();
+                        let mut rel_type = String::new();
                         let mut linked = false;
 
-                        if src.category == "FileSystem" && tgt.category == "Execution" && src.timestamp <= tgt.timestamp {
-                            rel_type = "dropped_and_executed".into(); linked = true;
-                        } else if src.category == "Execution" && tgt.category == "Persistence" && src.timestamp <= tgt.timestamp {
-                            rel_type = "established_persistence".into(); linked = true;
-                        } else if src.category == "Execution" && src.original_event.is_lnk_source() && src.timestamp <= tgt.timestamp {
-                             rel_type = "initial_access_launcher".into(); linked = true;
-                        } else if src.category == "Execution" && tgt.category == "Network" && src.timestamp <= tgt.timestamp && delta < 300 {
-                            rel_type = "c2_communication".into(); linked = true;
+                        // 부모-자식 프로세스 엄격 매칭
+                        if src.category == "Execution" && tgt.category == "Execution" {
+                            if let (ForensicEvent::Execution(s_exec), ForensicEvent::Execution(t_exec)) = (&src.original_event, &tgt.original_event) {
+                                let s_proc = s_exec.process_name.split('\\').last().unwrap_or("").to_lowercase();
+                                let t_parent = t_exec.parent_process_name.split('\\').last().unwrap_or("").to_lowercase();
+                                let t_proc = t_exec.process_name.split('\\').last().unwrap_or("").to_lowercase();
+                                let s_parent = s_exec.parent_process_name.split('\\').last().unwrap_or("").to_lowercase();
+                                
+                                if !s_proc.is_empty() && s_proc == t_parent && src.timestamp <= tgt.timestamp {
+                                    rel_type = "spawned_process".into(); linked = true;
+                                } else if !t_proc.is_empty() && t_proc == s_parent && tgt.timestamp <= src.timestamp {
+                                    rel_type = "spawned_process".into(); linked = true;
+                                }
+                            }
+                        }
+
+                        // 범용 fallback 없이 확정적인 시스템 킬체인 인과율만 선으로 긋는다.
+                        if !linked {
+                            if src.category == "FileSystem" && tgt.category == "Execution" && src.timestamp <= tgt.timestamp {
+                                rel_type = "dropped_and_executed".into(); linked = true;
+                            } else if src.category == "Execution" && tgt.category == "FileSystem" && src.timestamp <= tgt.timestamp {
+                                rel_type = "executed_and_dropped".into(); linked = true; // 새로 추가된 페이로드 드롭 인과율
+                            } else if src.category == "Execution" && tgt.category == "Persistence" && src.timestamp <= tgt.timestamp {
+                                rel_type = "established_persistence".into(); linked = true;
+                            } else if src.category == "Execution" && src.original_event.is_lnk_source() && src.timestamp <= tgt.timestamp {
+                                rel_type = "initial_access_launcher".into(); linked = true;
+                            } else if src.category == "Execution" && tgt.category == "Network" && src.timestamp <= tgt.timestamp && delta < 300 {
+                                rel_type = "c2_communication".into(); linked = true;
+                            }
                         }
 
                         if linked {
@@ -202,7 +251,6 @@ impl CorrelationEngine {
             .collect();
     }
 
-    // [핵심] Step 3: 그래프 탐색 및 위협 캠페인 클러스터링 로직
     pub fn build_campaigns(&mut self) {
         let mut adj: HashMap<String, Vec<String>> = HashMap::new();
         for rel in &self.relationships {
@@ -220,7 +268,6 @@ impl CorrelationEngine {
         }
 
         for entry in &self.events {
-            // 기본 점수가 낮거나 이미 탐색된 노드는 건너뛴다
             if visited.contains(&entry.id) || entry.score < 10 { continue; }
 
             let mut cluster_ids = Vec::new();
@@ -228,7 +275,6 @@ impl CorrelationEngine {
             stack.push_back(entry.id.clone());
             visited.insert(entry.id.clone());
 
-            // DFS 그래프 탐색
             while let Some(node_id) = stack.pop_back() {
                 cluster_ids.push(node_id.clone());
                 if let Some(neighbors) = adj.get(&node_id) {
@@ -241,7 +287,6 @@ impl CorrelationEngine {
                 }
             }
 
-            // 연결된 노드가 2개 이상인 경우에만 캠페인화 고려
             if cluster_ids.len() > 1 {
                 let mut total_score = 0;
                 let mut sequences = Vec::new();
@@ -252,7 +297,6 @@ impl CorrelationEngine {
                     }
                 }
 
-                // 총 위협 점수가 50점을 넘는 서브그래프만 공격 캠페인으로 확정
                 if total_score >= 50 {
                     sequences.sort();
                     sequences.dedup();
@@ -275,7 +319,6 @@ impl CorrelationEngine {
     pub fn get_relationships(&self) -> &Vec<EventRelationship> { &self.relationships }
     pub fn get_campaigns(&self) -> &Vec<ThreatCampaign> { &self.campaigns }
     
-    // 캠페인에 소속된 이벤트만 필터링하여 반환
     pub fn get_filtered_timeline(&self) -> Vec<TimelineEntry> {
         let mut valid_ids = HashSet::new();
         for c in &self.campaigns { 

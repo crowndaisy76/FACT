@@ -8,7 +8,7 @@ use collector::artifacts::ForensicCollector;
 use models::artifact::ArtifactTarget;
 use models::event::{ForensicEvent, ExecutionEvent};
 use analyzer::AnalysisEngine;
-use analyzer::Preprocessor;
+use analyzer::preprocess::Preprocessor;
 use chrono::Utc;
 use tracing_subscriber::EnvFilter;
 use std::fs;
@@ -108,18 +108,15 @@ fn main() -> Result<()> {
     
     tracing::info!("Starting Correlation Engine...");
     let mut engine = analyzer::correlation::CorrelationEngine::new();
-    
-    // 중복 제거 후 단 한 번만 데이터 주입
     engine.ingest(filtered_events);
     
-    // Step 2 & Step 3 실행
     engine.analyze_multi_hop_causality();
     engine.build_campaigns();
 
     let final_timeline = engine.get_filtered_timeline();
-    let campaigns = engine.get_campaigns();
+    let campaigns = engine.get_campaigns().clone();
 
-    tracing::info!("Step 3 Complete: Detected {} Threat Campaigns containing {} events.", campaigns.len(), final_timeline.len());
+    tracing::info!("Step 5 Complete: Detected {} Campaigns.", campaigns.len());
 
     let results_dir = Path::new("Results");
     if !results_dir.exists() { fs::create_dir_all(results_dir).context("Failed to create Results directory")?; }
@@ -127,7 +124,7 @@ fn main() -> Result<()> {
     let stix_bundle = analyzer::stix::StixBuilder::generate_bundle(
         &final_timeline,
         engine.get_relationships(),
-        campaigns
+        &campaigns
     );
 
     let mut stix_file = File::create("Results\\final_threat_report.json").context("Failed to create JSON file")?;
