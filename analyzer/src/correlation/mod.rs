@@ -43,6 +43,8 @@ pub struct ThreatCampaign {
     pub sequences: Vec<String>,
     pub associated_entities: Vec<String>,
     pub confidence: f32,
+    #[serde(default)]
+    pub mitre_tactics: Vec<String>,
 }
 
 pub struct CorrelationEngine {
@@ -50,6 +52,8 @@ pub struct CorrelationEngine {
     pub relationships: Vec<EventRelationship>,
     pub campaigns: Vec<ThreatCampaign>,
     pub entity_index: HashMap<String, Vec<String>>, 
+    // Step 4: 글로벌 PID 캐시
+    pub global_pid_cache: HashMap<u32, String>,
 }
 
 impl CorrelationEngine {
@@ -59,12 +63,35 @@ impl CorrelationEngine {
             relationships: Vec::new(), 
             campaigns: Vec::new(),
             entity_index: HashMap::new(),
+            global_pid_cache: HashMap::new(),
         }
     }
 
-    pub fn ingest(&mut self, raw_events: Vec<ForensicEvent>) {
+    pub fn ingest(&mut self, mut raw_events: Vec<ForensicEvent>) {
+        // [Step 4] Pass 1: 글로벌 PID 캐시 구축
+        for event in &raw_events {
+            if let ForensicEvent::Execution(e) = event {
+                if e.process_id != 0 && !e.process_name.is_empty() {
+                    let filename = e.process_name.split('\\').last().unwrap_or(&e.process_name).to_lowercase();
+                    self.global_pid_cache.insert(e.process_id, filename);
+                }
+            }
+        }
+
+        // [Step 4] Pass 2: 누락된 부모 프로세스 이름 복원
+        for event in &mut raw_events {
+            if let ForensicEvent::Execution(e) = event {
+                let current_parent = e.parent_process_name.trim();
+                // 괄호만 있거나 비어있는 경우 복원 시도
+                if (current_parent.is_empty() || current_parent == ")") && e.parent_process_id != 0 {
+                    if let Some(cached_name) = self.global_pid_cache.get(&e.parent_process_id) {
+                        e.parent_process_name = cached_name.clone();
+                    }
+                }
+            }
+        }
+
         let mut counter = 0;
-        
         for event in raw_events {
             let (score, category, summary, entities) = self.extract_context_and_score(&event);
             if score == 0 && entities.is_empty() { continue; }
@@ -186,8 +213,7 @@ impl CorrelationEngine {
             
             for entity in &src.entities {
                 if let Some(related_ids) = self.entity_index.get(entity) {
-                    // 조합 폭발의 원흉인 다빈도 엔티티(50회 초과)는 연산에서 완전히 배제한다.
-                    if related_ids.len() > 50 { continue; }
+                    if related_ids.len() > 50 { continue; } 
 
                     for target_id in related_ids {
                         if target_id == &src.id { continue; }
@@ -203,7 +229,6 @@ impl CorrelationEngine {
                         let mut rel_type = String::new();
                         let mut linked = false;
 
-                        // 부모-자식 프로세스 엄격 매칭
                         if src.category == "Execution" && tgt.category == "Execution" {
                             if let (ForensicEvent::Execution(s_exec), ForensicEvent::Execution(t_exec)) = (&src.original_event, &tgt.original_event) {
                                 let s_proc = s_exec.process_name.split('\\').last().unwrap_or("").to_lowercase();
@@ -211,20 +236,24 @@ impl CorrelationEngine {
                                 let t_proc = t_exec.process_name.split('\\').last().unwrap_or("").to_lowercase();
                                 let s_parent = s_exec.parent_process_name.split('\\').last().unwrap_or("").to_lowercase();
                                 
-                                if !s_proc.is_empty() && s_proc == t_parent && src.timestamp <= tgt.timestamp {
+                                let s_proc_valid = !s_proc.is_empty();
+                                let t_parent_valid = !t_parent.is_empty() && t_parent != ")";
+                                let t_proc_valid = !t_proc.is_empty();
+                                let s_parent_valid = !s_parent.is_empty() && s_parent != ")";
+
+                                if s_proc_valid && t_parent_valid && s_proc == t_parent && src.timestamp <= tgt.timestamp {
                                     rel_type = "spawned_process".into(); linked = true;
-                                } else if !t_proc.is_empty() && t_proc == s_parent && tgt.timestamp <= src.timestamp {
+                                } else if t_proc_valid && s_parent_valid && t_proc == s_parent && tgt.timestamp <= src.timestamp {
                                     rel_type = "spawned_process".into(); linked = true;
-                                }
+                                } 
                             }
                         }
 
-                        // 범용 fallback 없이 확정적인 시스템 킬체인 인과율만 선으로 긋는다.
                         if !linked {
                             if src.category == "FileSystem" && tgt.category == "Execution" && src.timestamp <= tgt.timestamp {
                                 rel_type = "dropped_and_executed".into(); linked = true;
                             } else if src.category == "Execution" && tgt.category == "FileSystem" && src.timestamp <= tgt.timestamp {
-                                rel_type = "executed_and_dropped".into(); linked = true; // 새로 추가된 페이로드 드롭 인과율
+                                rel_type = "executed_and_dropped".into(); linked = true; 
                             } else if src.category == "Execution" && tgt.category == "Persistence" && src.timestamp <= tgt.timestamp {
                                 rel_type = "established_persistence".into(); linked = true;
                             } else if src.category == "Execution" && src.original_event.is_lnk_source() && src.timestamp <= tgt.timestamp {
@@ -308,6 +337,7 @@ impl CorrelationEngine {
                         sequences,
                         associated_entities: cluster_ids,
                         confidence: (total_score as f32 / 300.0).min(1.0),
+                        mitre_tactics: Vec::new(),
                     });
                     campaign_count += 1;
                 }

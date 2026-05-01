@@ -3,7 +3,7 @@ use chrono::Utc;
 use models::event::{ForensicEvent, PersistenceEvent};
 
 pub fn parse_task_xml(data: &[u8], filename: &str) -> Result<Vec<ForensicEvent>> {
-    // 예약 작업 XML 파일의 BOM 여부를 확인하여 UTF-16 또는 UTF-8로 디코딩한다.
+    // 단순 무식하게 XML 문자열만 추출 (BOM 처리 포함, UTF-16 또는 UTF-8)
     let xml_str = if data.len() > 2 && data[0] == 0xFF && data[1] == 0xFE {
         let u16_data: Vec<u16> = data[2..]
             .chunks_exact(2)
@@ -31,6 +31,7 @@ pub fn parse_task_xml(data: &[u8], filename: &str) -> Result<Vec<ForensicEvent>>
             persistence_type: "Scheduled Task (XML)".to_string(),
             target_name: filename.split('\\').last().unwrap_or(filename).to_string(),
             target_path,
+            payload: String::new(), // 에러 수정
             source_artifact: format!("Task: {}", filename),
         }));
     }

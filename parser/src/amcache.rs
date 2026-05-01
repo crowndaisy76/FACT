@@ -1,9 +1,11 @@
+use chrono::{DateTime, Utc};
 use anyhow::Result;
 
 #[derive(Debug, Clone)]
 pub struct AmcacheRecord {
-    pub file_path: String, // 구조체 필드명
+    pub file_path: String,
     pub sha1: String,
+    pub timestamp: DateTime<Utc>, // Main 함수 및 모델과 호환되도록 timestamp 필드 추가
 }
 
 pub fn parse_amcache_carve(data: &[u8]) -> Result<Vec<AmcacheRecord>> {
@@ -62,8 +64,11 @@ pub fn parse_amcache_carve(data: &[u8]) -> Result<Vec<AmcacheRecord>> {
                     }
                 }
                 
-                // [Fix] path -> file_path 로 필드명 일치
-                records.push(AmcacheRecord { file_path: parsed_path, sha1 });
+                records.push(AmcacheRecord { 
+                    file_path: parsed_path, 
+                    sha1,
+                    timestamp: Utc::now() // Amcache 카빙 특성상 정확한 실행 시간을 알 수 없으므로 현재 시간으로 초기화
+                });
             }
             i = j; // 문자열 길이만큼 점프
         } else {
@@ -71,7 +76,6 @@ pub fn parse_amcache_carve(data: &[u8]) -> Result<Vec<AmcacheRecord>> {
         }
     }
     
-    // [Fix] a.path -> a.file_path 로 수정
     records.sort_by(|a, b| a.file_path.cmp(&b.file_path));
     records.dedup_by(|a, b| a.file_path == b.file_path);
     

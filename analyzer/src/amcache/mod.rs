@@ -28,16 +28,17 @@ impl ArtifactAnalyzer for AmcacheAnalyzer {
                 events.push(ForensicEvent::Execution(ExecutionEvent {
                     timestamp: Utc::now(),
                     process_name: rec.file_path.split('\\').last().unwrap_or("Unknown").to_string(),
+                    process_id: 0,          // 에러 수정
+                    parent_process_id: 0,   // 에러 수정
                     file_path: format!("{} [SHA1: {}]", rec.file_path, rec.sha1),
-                    command_line: String::new(), // [추가]
-                    parent_process_name: String::new(), // [추가]
+                    command_line: String::new(), 
+                    parent_process_name: String::new(), 
                     run_count: 1,
                     referenced_files: vec![],
                     source_artifact: "Amcache.hve".to_string(),
                 }));
             }
         }
-
         Ok(events)
     }
 }

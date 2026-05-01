@@ -19,18 +19,18 @@ impl ArtifactAnalyzer for PrefetchAnalyzer {
 
     fn analyze(&self, filename: &str, data: &[u8]) -> Result<Vec<ForensicEvent>> {
         let mut events = Vec::new();
-
         match parse_prefetch_info(data) {
             Ok(info) => {
                 for timestamp in info.last_run_times {
                     let event = ForensicEvent::Execution(ExecutionEvent {
                         timestamp,
                         process_name: info.executable_name.clone(),
+                        process_id: 0,          // 에러 수정
+                        parent_process_id: 0,   // 에러 수정
                         file_path: filename.to_string(), 
-                        command_line: String::new(), // [추가] Prefetch는 커맨드라인을 제공하지 않으므로 빈 문자열
-                        parent_process_name: String::new(), // [추가] 부모 프로세스 정보 없음
+                        command_line: String::new(), 
+                        parent_process_name: String::new(), 
                         run_count: info.run_count,
-                        // [수정] 빈 배열이 아닌, 파서가 추출한 실제 참조 파일 목록을 매핑함
                         referenced_files: info.referenced_files.clone(), 
                         source_artifact: "Prefetch".to_string(),
                     });
@@ -41,7 +41,6 @@ impl ArtifactAnalyzer for PrefetchAnalyzer {
                 tracing::warn!("Failed to parse Prefetch {}: {}", filename, e);
             }
         }
-
         Ok(events)
     }
 }

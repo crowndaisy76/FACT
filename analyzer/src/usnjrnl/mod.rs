@@ -33,7 +33,6 @@ impl ArtifactAnalyzer for UsnJrnlAnalyzer {
     fn analyze(&self, filename: &str, data: &[u8]) -> Result<Vec<ForensicEvent>> {
         let mut events = Vec::new();
         
-        // $UsnJrnl 필터 (파일 이름이 매칭되거나 $J 스트림일 경우)
         if !filename.eq_ignore_ascii_case("$UsnJrnl") && !filename.eq_ignore_ascii_case("$J") {
             return Ok(events);
         }
@@ -41,24 +40,19 @@ impl ArtifactAnalyzer for UsnJrnlAnalyzer {
         if let Ok(records) = parse_usnjrnl_stream(data) {
             for rec in records {
                 let reasons = Self::translate_reason(rec.reason_flags).join(" | ");
-                let is_dir = (rec.file_attributes & 0x00000010) != 0;
-
-                // 의미 있는 조작(생성, 삭제, 이름변경)만 필터링하여 노이즈 감소
+                
                 if rec.reason_flags & 0x00003300 != 0 { 
                     events.push(ForensicEvent::FileSystemActivity(FileSystemEvent {
                         timestamp: rec.timestamp,
-                        file_name: rec.file_name,
-                        reason: reasons,
-                        is_dir,
-                        si_mtime: None,        // [추가] USN 저널은 SI/FN 상세 시간이 없으므로 None 처리
-                        fn_mtime: None,        // [추가]
-                        is_timestomped: false, // [추가]
+                        file_name: rec.file_name.clone(),
+                        file_path: rec.file_name,
+                        activity_type: reasons, // 에러 수정
+                        is_timestomped: false,
                         source_artifact: "$Extend\\$UsnJrnl".to_string(),
                     }));
                 }
             }
         }
-
         Ok(events)
     }
 }

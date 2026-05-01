@@ -6,7 +6,7 @@ use std::collections::HashSet;
 pub fn parse_ntuser_run_keys(data: &[u8], filename: &str) -> Result<Vec<ForensicEvent>> {
     let mut events = Vec::new();
     
-    // 1. 바이트 슬라이싱 패닉을 방지하기 위해 데이터를 순수 char 벡터로 변환
+    // 1. 데이터를 UTF-16으로 간주하고 char 배열로 변환
     let u16_data: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
     let chars: Vec<char> = std::char::decode_utf16(u16_data)
         .map(|r| r.unwrap_or('\u{FFFD}'))
@@ -14,7 +14,7 @@ pub fn parse_ntuser_run_keys(data: &[u8], filename: &str) -> Result<Vec<Forensic
     
     let lower_chars: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
     
-    // 검색할 확장자 타겟을 char 배열로 정의
+    // 찾을 키워드를 char 배열로 선언
     let targets = [
         vec!['.', 'e', 'x', 'e'],
         vec!['.', 'b', 'a', 't'],
@@ -25,7 +25,7 @@ pub fn parse_ntuser_run_keys(data: &[u8], filename: &str) -> Result<Vec<Forensic
     let mut extracted = HashSet::new();
     let mut i = 0;
 
-    // 2. 바이트가 아닌 char 인덱스 기반 탐색 (100% 안전)
+    // 2. 슬라이딩 윈도우 방식으로 char 단위 비교 (100% 매칭률 보장)
     while i < chars.len() {
         let mut matched_len = 0;
         for target in &targets {
@@ -36,18 +36,18 @@ pub fn parse_ntuser_run_keys(data: &[u8], filename: &str) -> Result<Vec<Forensic
         }
 
         if matched_len > 0 {
-            // 일치하는 확장자를 찾았으므로 경로의 시작점(뒤로 가기) 찾기
+            // 키워드를 찾았으므로 앞뒤로 출력 가능한 문자(경로)를 수집
             let mut start = i;
             while start > 0 {
                 let ch = chars[start - 1];
-                // 경로에 사용될 수 있는 아스키 문자와 공백만 허용
+                // 제어 문자나 널 바이트를 만나면 중단
                 if !ch.is_ascii_graphic() && ch != ' ' {
                     break;
                 }
                 start -= 1;
             }
 
-            // 인자(Arguments)를 포함하기 위해 경로의 끝점(앞으로 가기) 찾기
+            // 뒤로 파라미터(Arguments)까지 포함할 수 있도록 확장
             let mut end = i + matched_len;
             while end < chars.len() {
                 let ch = chars[end];
@@ -58,18 +58,20 @@ pub fn parse_ntuser_run_keys(data: &[u8], filename: &str) -> Result<Vec<Forensic
             }
 
             if start < end {
-                // char 벡터를 안전하게 String으로 묶어냄
+                // char 슬라이스를 String으로 변환
                 let extracted_path: String = chars[start..end].iter().collect();
                 let trimmed = extracted_path.trim().to_string();
                 
-                // C:\ 와 같은 드라이브 문자열이 포함된 정상적인 경로인지 검증
+                // C:\ 와 같은 절대경로 패턴이 포함된 경우만 유효한 값으로 취급
                 if trimmed.contains(":\\") && !extracted.contains(&trimmed) {
                     extracted.insert(trimmed.clone());
+
                     events.push(ForensicEvent::Persistence(PersistenceEvent {
                         timestamp: Utc::now(),
                         persistence_type: "Registry Run Key (NTUSER.DAT)".to_string(),
                         target_name: filename.split('\\').last().unwrap_or(filename).to_string(),
                         target_path: trimmed,
+                        payload: String::new(), // 에러 수정
                         source_artifact: format!("Registry: {}", filename),
                     }));
                 }

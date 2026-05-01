@@ -8,6 +8,7 @@ pub mod ntuser;
 pub mod preprocess; // [추가] 전처리기 모듈
 pub mod correlation;
 pub mod stix;
+pub mod intelligence;
 
 use anyhow::Result;
 use models::event::ForensicEvent;

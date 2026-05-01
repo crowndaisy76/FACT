@@ -3,7 +3,7 @@
 debug
 target
 output_artifacts/
-testing
+test
 ref
 Results
 

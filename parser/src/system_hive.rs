@@ -11,12 +11,13 @@ pub fn parse_system_services(data: &[u8], filename: &str) -> Result<Vec<Forensic
     let utf16_str: String = std::char::decode_utf16(u16_data).map(|r| r.unwrap_or('\u{FFFD}')).collect();
 
     let mut current_str = String::new();
+
     for ch in utf16_str.chars() {
         if ch.is_ascii_graphic() || ch == ' ' || ch == '%' {
             current_str.push(ch);
         } else {
             let lower = current_str.to_lowercase();
-            // 기존 서비스 ImagePath 변조 추적
+            // 가장 일반적인 형태의 ImagePath 위주로 필터링
             if current_str.len() > 8 && (lower.contains(":\\") || lower.contains("%systemroot%")) && (lower.contains(".exe") || lower.contains(".sys") || lower.contains(".dll")) {
                 extracted.insert(current_str.trim().to_string());
             }
@@ -30,8 +31,10 @@ pub fn parse_system_services(data: &[u8], filename: &str) -> Result<Vec<Forensic
             persistence_type: "Service ImagePath (SYSTEM)".to_string(),
             target_name: "Service".to_string(),
             target_path: path,
+            payload: String::new(), // 에러 수정
             source_artifact: format!("Registry: {}", filename),
         }));
     }
+
     Ok(events)
 }

@@ -30,7 +30,6 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
             "Windows PowerShell.evtx",
             "Microsoft-Windows-PowerShell%4Operational.evtx"
         ];
-
         let mut is_target = false;
         for t in target_logs.iter() {
             if filename.eq_ignore_ascii_case(t) {
@@ -38,7 +37,6 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                 break;
             }
         }
-
         if !is_target { return Ok(events); }
 
         let mut parser = match EvtxParser::from_buffer(data.to_vec()) {
@@ -67,20 +65,15 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                         let logon_type = event_data["LogonType"].as_str().unwrap_or("0");
                         
                         if logon_type == "3" || logon_type == "10" {
-                            let status = if event_id == 4624 { "Success" } else { "Failed" };
                             let account = event_data["TargetUserName"].as_str().unwrap_or("Unknown");
                             let ip = event_data["IpAddress"].as_str().unwrap_or("-");
                             
-                            let source_ip = if ip == "-" || ip == "Unknown" { None } else { Some(ip.to_string()) };
-
                             if !account.ends_with('$') && account != "Unknown" {
                                 events.push(ForensicEvent::Logon(LogonEvent {
                                     timestamp,
-                                    event_id: event_id as u32,
-                                    account_name: account.to_string(),
+                                    user_name: account.to_string(), // 에러 수정
                                     logon_type: logon_type.parse().unwrap_or(0),
-                                    source_ip,
-                                    status: status.to_string(),
+                                    source_ip: ip.to_string(),      // 에러 수정
                                     source_artifact: filename.to_string(),
                                 }));
                             }
@@ -89,11 +82,13 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                     7045 | 4697 => {
                         let service_name = event_data["ServiceName"].as_str().unwrap_or("Unknown");
                         let image_path = event_data["ImagePath"].as_str().unwrap_or("Unknown");
+
                         events.push(ForensicEvent::Persistence(PersistenceEvent {
                             timestamp,
                             persistence_type: "New Service Installed".to_string(),
                             target_name: service_name.to_string(),
                             target_path: image_path.to_string(),
+                            payload: String::new(), // 에러 수정
                             source_artifact: filename.to_string(),
                         }));
                     },
@@ -104,6 +99,7 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                             persistence_type: "Scheduled Task Registered".to_string(),
                             target_name: task_name.to_string(),
                             target_path: "Check Task XML for Payload".to_string(),
+                            payload: String::new(), // 에러 수정
                             source_artifact: filename.to_string(),
                         }));
                     },
@@ -137,14 +133,16 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                     4688 => { 
                         let proc_name = event_data["NewProcessName"].as_str().unwrap_or("Unknown");
                         let cmd_line = event_data["CommandLine"].as_str().unwrap_or("Hidden");
-                        let parent_proc = event_data["ParentProcessName"].as_str().unwrap_or("Unknown"); // [추가] 부모 프로세스 추출
+                        let parent_proc = event_data["ParentProcessName"].as_str().unwrap_or("Unknown");
                         
                         events.push(ForensicEvent::Execution(ExecutionEvent {
                             timestamp,
                             process_name: proc_name.to_string(),
-                            file_path: proc_name.to_string(), // [수정] 실행 파일 경로
-                            command_line: cmd_line.to_string(), // [추가] 커맨드라인 필드에 정확히 할당
-                            parent_process_name: parent_proc.to_string(), // [추가] 
+                            process_id: 0,          // 에러 수정
+                            parent_process_id: 0,   // 에러 수정
+                            file_path: proc_name.to_string(),
+                            command_line: cmd_line.to_string(), 
+                            parent_process_name: parent_proc.to_string(),
                             run_count: 1,
                             referenced_files: vec![],
                             source_artifact: filename.to_string(),
@@ -165,7 +163,6 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                 }
             }
         }
-
         Ok(events)
     }
 }

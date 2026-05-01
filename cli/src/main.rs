@@ -18,7 +18,7 @@ use std::path::Path;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(EnvFilter::new("info,evtx=warn")).init();
-    tracing::info!("FACT Engine v5 - Final Correlation & STIX Generation");
+    tracing::info!("FACT Engine v5 - Correlation & Intelligence Generation");
 
     enable_privilege(w!("SeBackupPrivilege")).context("Failed to enable SeBackupPrivilege")?;
     
@@ -47,9 +47,14 @@ fn main() -> Result<()> {
                     if let Ok(info) = parser::prefetch::parse_prefetch_info(data) {
                         all_raw_events.push(ForensicEvent::Execution(ExecutionEvent {
                             timestamp: info.last_run_times.first().copied().unwrap_or_else(Utc::now),
-                            process_name: info.executable_name, file_path: filename.to_string(),
-                            command_line: String::new(), parent_process_name: String::new(),
-                            run_count: info.run_count, referenced_files: info.referenced_files,
+                            process_name: info.executable_name, 
+                            process_id: 0,             // [에러 수정] PID 초기화
+                            parent_process_id: 0,      // [에러 수정] Parent PID 초기화
+                            file_path: filename.to_string(),
+                            command_line: String::new(), 
+                            parent_process_name: String::new(),
+                            run_count: info.run_count, 
+                            referenced_files: info.referenced_files,
                             source_artifact: format!("Prefetch ({})", filename),
                         }));
                     }
@@ -70,9 +75,13 @@ fn main() -> Result<()> {
                             all_raw_events.push(ForensicEvent::Execution(ExecutionEvent {
                                 timestamp: Utc::now(),
                                 process_name: rec.file_path.split('\\').last().unwrap_or("Unknown").to_string(),
+                                process_id: 0,             // [에러 수정] PID 초기화
+                                parent_process_id: 0,      // [에러 수정] Parent PID 초기화
                                 file_path: format!("{} [SHA1: {}]", rec.file_path, rec.sha1),
-                                command_line: String::new(), parent_process_name: String::new(),
-                                run_count: 1, referenced_files: vec![],
+                                command_line: String::new(), 
+                                parent_process_name: String::new(),
+                                run_count: 1, 
+                                referenced_files: vec![],
                                 source_artifact: "Amcache.hve".to_string(),
                             }));
                         }
@@ -114,9 +123,12 @@ fn main() -> Result<()> {
     engine.build_campaigns();
 
     let final_timeline = engine.get_filtered_timeline();
-    let campaigns = engine.get_campaigns().clone();
+    let mut campaigns = engine.get_campaigns().clone();
 
-    tracing::info!("Step 5 Complete: Detected {} Campaigns.", campaigns.len());
+    // [Step 1] (MITRE ATT&CK) 
+    analyzer::intelligence::ThreatIntelligence::enrich(&mut campaigns);
+
+    tracing::info!("Intelligence Step Complete: Detected {} Campaigns.", campaigns.len());
 
     let results_dir = Path::new("Results");
     if !results_dir.exists() { fs::create_dir_all(results_dir).context("Failed to create Results directory")?; }
