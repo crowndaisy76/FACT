@@ -2,7 +2,7 @@
 # will have compiled files and executables
 engine/target
 ref
-engine/Results
+Results
 
 raganaylst/venv/
 venv/
