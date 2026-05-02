@@ -33,6 +33,7 @@ pub struct TimelineEntry {
     pub original_event: ForensicEvent,
     pub score: i32,
     pub entities: Vec<String>,
+    pub matched_ttps: Vec<String>, // Step 8: 매칭된 TTP 추가
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,28 +48,92 @@ pub struct ThreatCampaign {
     pub mitre_tactics: Vec<String>,
 }
 
+// Step 8: Sigma 스타일의 룰 구조체
+struct DetectionRule {
+    name: &'static str,
+    score: i32,
+    ttp: &'static str,
+    eval: Box<dyn Fn(&str, &str, &str) -> bool>, // (process_name, parent_name, command_line)
+}
+
 pub struct CorrelationEngine {
     pub events: Vec<TimelineEntry>,
     pub relationships: Vec<EventRelationship>,
     pub campaigns: Vec<ThreatCampaign>,
     pub entity_index: HashMap<String, Vec<String>>, 
-    // Step 4: 글로벌 PID 캐시
     pub global_pid_cache: HashMap<u32, String>,
+    rules: Vec<DetectionRule>, // Step 8: 룰 엔진 내장
 }
 
 impl CorrelationEngine {
     pub fn new() -> Self {
+        let rules = vec![
+            // 1. Suspicious PowerShell Execution (e.g., Encoded or Hidden)
+            DetectionRule {
+                name: "Suspicious PowerShell Command",
+                score: 80,
+                ttp: "T1059.001",
+                eval: Box::new(|proc, _, cmd| {
+                    (proc == "powershell.exe" || proc == "pwsh.exe") &&
+                    (cmd.contains("-enc") || cmd.contains("hidden") || cmd.contains("bypass") || cmd.contains("downloadstring"))
+                }),
+            },
+            // 2. Suspicious Parent for Shells (e.g., Word spawning CMD)
+            DetectionRule {
+                name: "Suspicious Parent Process for Shell",
+                score: 100,
+                ttp: "T1059",
+                eval: Box::new(|proc, parent, _| {
+                    let shells = ["cmd.exe", "powershell.exe", "pwsh.exe"];
+                    let susp_parents = ["winword.exe", "excel.exe", "powerpnt.exe", "mshta.exe", "wscript.exe", "cscript.exe"];
+                    shells.contains(&proc) && susp_parents.contains(&parent)
+                }),
+            },
+            // 3. LSASS Memory Access (Credential Dumping)
+            DetectionRule {
+                name: "LSASS Memory Access/Dump",
+                score: 150,
+                ttp: "T1003.001",
+                eval: Box::new(|proc, parent, cmd| {
+                    proc == "lsass.exe" && parent != "wininit.exe" && !parent.is_empty() 
+                    || cmd.contains("comsvcs.dll") // comsvcs.dll, MiniDump
+                }),
+            },
+            // 4. Suspicious Svchost Execution (Masquerading or Injection)
+            DetectionRule {
+                name: "Suspicious Svchost Execution",
+                score: 120,
+                ttp: "T1036.005",
+                eval: Box::new(|proc, parent, cmd| {
+                    proc == "svchost.exe" && parent != "services.exe" && !parent.is_empty()
+                    || (proc == "svchost.exe" && !cmd.contains("-k")) // svchost는 보통 -k 인자와 함께 실행됨
+                }),
+            },
+             // 5. System Binary Proxy Execution (Rundll32, Regsvr32)
+            DetectionRule {
+                name: "Suspicious Proxy Execution",
+                score: 60,
+                ttp: "T1218",
+                eval: Box::new(|proc, _, cmd| {
+                    (proc == "rundll32.exe" || proc == "regsvr32.exe") &&
+                    (cmd.contains("javascript:") || cmd.contains("vbscript:") || cmd.contains("http"))
+                }),
+            }
+        ];
+
         Self { 
             events: Vec::new(), 
             relationships: Vec::new(), 
             campaigns: Vec::new(),
             entity_index: HashMap::new(),
             global_pid_cache: HashMap::new(),
+            rules,
         }
     }
 
     pub fn ingest(&mut self, mut raw_events: Vec<ForensicEvent>) {
-        // [Step 4] Pass 1: 글로벌 PID 캐시 구축
+        raw_events.sort_by_key(|e| self.extract_timestamp(e));
+
         for event in &raw_events {
             if let ForensicEvent::Execution(e) = event {
                 if e.process_id != 0 && !e.process_name.is_empty() {
@@ -78,13 +143,12 @@ impl CorrelationEngine {
             }
         }
 
-        // [Step 4] Pass 2: 누락된 부모 프로세스 이름 복원
         for event in &mut raw_events {
             if let ForensicEvent::Execution(e) = event {
                 let current_parent = e.parent_process_name.trim();
-                // 괄호만 있거나 비어있는 경우 복원 시도
                 if (current_parent.is_empty() || current_parent == ")") && e.parent_process_id != 0 {
                     if let Some(cached_name) = self.global_pid_cache.get(&e.parent_process_id) {
+                         // 노이즈 필터링은 제거하고, 정확한 룰 매칭으로 승부한다.
                         e.parent_process_name = cached_name.clone();
                     }
                 }
@@ -93,7 +157,7 @@ impl CorrelationEngine {
 
         let mut counter = 0;
         for event in raw_events {
-            let (score, category, summary, entities) = self.extract_context_and_score(&event);
+            let (score, category, summary, entities, matched_ttps) = self.extract_context_and_score(&event);
             if score == 0 && entities.is_empty() { continue; }
 
             counter += 1;
@@ -105,7 +169,7 @@ impl CorrelationEngine {
 
             self.events.push(TimelineEntry {
                 id: entry_id, timestamp: self.extract_timestamp(&event),
-                category, summary, original_event: event, score, entities,
+                category, summary, original_event: event, score, entities, matched_ttps,
             });
         }
         self.events.sort_by_key(|e| e.timestamp);
@@ -122,33 +186,28 @@ impl CorrelationEngine {
         }
     }
 
-    fn extract_context_and_score(&self, event: &ForensicEvent) -> (i32, String, String, Vec<String>) {
+    fn extract_context_and_score(&self, event: &ForensicEvent) -> (i32, String, String, Vec<String>, Vec<String>) {
         let mut score = 0;
         let mut entities = Vec::new();
+        let mut matched_ttps = Vec::new();
 
         match event {
             ForensicEvent::Execution(e) => {
                 let filename = e.process_name.split('\\').last().unwrap_or(&e.process_name).to_lowercase();
                 let parent_name = e.parent_process_name.split('\\').last().unwrap_or(&e.parent_process_name).to_lowercase();
+                let cmd_lower = e.command_line.to_lowercase();
 
                 if !filename.is_empty() { entities.push(filename.clone()); }
 
-                let suspicious_parents = ["winword.exe", "excel.exe", "powerpnt.exe", "wscript.exe", "cscript.exe", "mshta.exe"];
-                let shells = ["cmd.exe", "powershell.exe", "pwsh.exe"];
-                
-                if shells.contains(&filename.as_str()) && suspicious_parents.contains(&parent_name.as_str()) {
-                    score += 150;
-                }
-                
-                if filename == "lsass.exe" && parent_name != "wininit.exe" && !parent_name.is_empty() {
-                    score += 200; 
-                }
-                if filename == "svchost.exe" && parent_name != "services.exe" && !parent_name.is_empty() {
-                    score += 150; 
+                // Step 8: Sigma 기반 룰 엔진 평가
+                for rule in &self.rules {
+                    if (rule.eval)(&filename, &parent_name, &cmd_lower) {
+                        score += rule.score;
+                        matched_ttps.push(rule.ttp.to_string());
+                    }
                 }
 
-                let cmd_lower = e.command_line.to_lowercase();
-                
+                // 엔티티 추출 (실행 파일 추출)
                 for token in cmd_lower.split_whitespace() {
                     let clean_token = token.trim_matches(|c| c == '\'' || c == '"' || c == '\\' || c == ']' || c == '[');
                     if clean_token.ends_with(".exe") || clean_token.ends_with(".ps1") || clean_token.ends_with(".dll") {
@@ -157,17 +216,26 @@ impl CorrelationEngine {
                     }
                 }
 
-                if e.source_artifact.starts_with("LNK") { score += 40; entities.push("lnk_execution".into()); }
-                if cmd_lower.contains("-enc") || cmd_lower.contains("hidden") || cmd_lower.contains("bypass") || cmd_lower.contains("download") { score += 50; }
-                if score == 0 { score += 5; }
-                (score, "Execution".into(), format!("Run: {} (Parent: {})", filename, parent_name), entities)
+                if e.source_artifact.starts_with("LNK") { 
+                    score += 40; 
+                    entities.push("lnk_execution".into()); 
+                    matched_ttps.push("T1566.002".to_string()); 
+                }
+                
+                if score == 0 { score += 5; } // Base score
+
+                matched_ttps.dedup();
+                (score, "Execution".into(), format!("Run: {} (Parent: {})", filename, parent_name), entities, matched_ttps)
             },
             ForensicEvent::FileSystemActivity(f) => {
                 let filename = f.file_name.split('\\').last().unwrap_or(&f.file_name).to_lowercase();
                 if !filename.is_empty() { entities.push(filename.clone()); }
-                if f.is_timestomped { score += 80; }
+                if f.is_timestomped { 
+                    score += 80; 
+                    matched_ttps.push("T1070.006".to_string()); // Timestomp
+                }
                 if filename.ends_with(".ps1") || filename.ends_with(".vbs") || filename.ends_with(".bat") || filename.ends_with(".exe") || filename.ends_with(".dll") { score += 10; }
-                (score, "FileSystem".into(), format!("File: {}", filename), entities)
+                (score, "FileSystem".into(), format!("File: {}", filename), entities, matched_ttps)
             },
             ForensicEvent::Persistence(p) => {
                 let target_path_lower = p.target_path.to_lowercase();
@@ -178,24 +246,27 @@ impl CorrelationEngine {
                     let ext = target_path_lower[..idx+4].split('\\').last().unwrap_or("").to_string();
                     if !ext.is_empty() { entities.push(ext); }
                 }
-                if p.persistence_type.contains("WMI Event") { score += 70; }
-                if p.persistence_type.contains("SYSTEM") { score += 60; }
-                if p.persistence_type.contains("NTUSER") { score += 50; }
-                if p.persistence_type.contains("Task") { score += 30; }
-                (score, "Persistence".into(), format!("Persist: {}", p.persistence_type), entities)
+                if p.persistence_type.contains("WMI Event") { score += 70; matched_ttps.push("T1546.003".into()); }
+                if p.persistence_type.contains("SYSTEM") { score += 60; matched_ttps.push("T1543.003".into()); }
+                if p.persistence_type.contains("NTUSER") { score += 50; matched_ttps.push("T1547.001".into()); }
+                if p.persistence_type.contains("Task") { score += 30; matched_ttps.push("T1053.005".into()); }
+                (score, "Persistence".into(), format!("Persist: {}", p.persistence_type), entities, matched_ttps)
             },
             ForensicEvent::NetworkActivity(n) => {
                 entities.push(n.destination_ip.clone());
                 let proc_name = n.process_name.split('\\').last().unwrap_or(&n.process_name).to_lowercase();
                 if !proc_name.is_empty() && proc_name != "unknown" { entities.push(proc_name); }
                 score += 20;
-                (score, "Network".into(), format!("Connect: {}:{}", n.destination_ip, n.destination_port), entities)
+                (score, "Network".into(), format!("Connect: {}:{}", n.destination_ip, n.destination_port), entities, matched_ttps)
             },
             ForensicEvent::SystemActivity(s) => {
-                if s.activity_type.contains("[CRITICAL]") { score += 90; }
-                (score, "System".into(), s.activity_type.clone(), entities)
+                if s.activity_type.contains("[CRITICAL]") { 
+                    score += 90; 
+                    if s.description.contains("cleared") { matched_ttps.push("T1070.001".into()); } // Clear Windows Event Logs
+                }
+                (score, "System".into(), s.activity_type.clone(), entities, matched_ttps)
             },
-            _ => (0, "Other".into(), "Unknown".into(), entities)
+            _ => (0, "Other".into(), "Unknown".into(), entities, matched_ttps)
         }
     }
 
@@ -319,16 +390,21 @@ impl CorrelationEngine {
             if cluster_ids.len() > 1 {
                 let mut total_score = 0;
                 let mut sequences = Vec::new();
+                let mut all_ttps = Vec::new();
+
                 for id in &cluster_ids {
                     if let Some(e) = id_to_event.get(id) {
                         total_score += e.score;
                         sequences.push(e.summary.clone());
+                        all_ttps.extend(e.matched_ttps.clone());
                     }
                 }
 
                 if total_score >= 50 {
                     sequences.sort();
                     sequences.dedup();
+                    all_ttps.sort();
+                    all_ttps.dedup();
 
                     campaigns.push(ThreatCampaign {
                         id: format!("campaign-fact-{}", campaign_count),
@@ -337,7 +413,7 @@ impl CorrelationEngine {
                         sequences,
                         associated_entities: cluster_ids,
                         confidence: (total_score as f32 / 300.0).min(1.0),
-                        mitre_tactics: Vec::new(),
+                        mitre_tactics: all_ttps, // 매칭된 TTP 바로 할당
                     });
                     campaign_count += 1;
                 }

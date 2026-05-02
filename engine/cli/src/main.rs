@@ -130,8 +130,10 @@ fn main() -> Result<()> {
 
     tracing::info!("Intelligence Step Complete: Detected {} Campaigns.", campaigns.len());
 
-    let results_dir = Path::new("Results");
-    if !results_dir.exists() { fs::create_dir_all(results_dir).context("Failed to create Results directory")?; }
+    let results_dir = Path::new("..").join("Results");
+    if !results_dir.exists() { 
+        fs::create_dir_all(&results_dir).context("Failed to create Results directory")?; 
+    }
 
     let stix_bundle = analyzer::stix::StixBuilder::generate_bundle(
         &final_timeline,
@@ -139,9 +141,10 @@ fn main() -> Result<()> {
         &campaigns
     );
 
-    let mut stix_file = File::create("Results\\final_threat_report.json").context("Failed to create JSON file")?;
+    let file_path = results_dir.join("final_threat_report.json");
+    let mut stix_file = File::create(&file_path).context("Failed to create JSON file")?;
     stix_file.write_all(serde_json::to_string_pretty(&stix_bundle)?.as_bytes()).context("Failed to write JSON")?;
 
-    tracing::info!("STIX 2.1 Threat Report saved to Results/final_threat_report.json");
+    tracing::info!("STIX 2.1 Threat Report saved to {:?}", file_path);
     Ok(())
 }
