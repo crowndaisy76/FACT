@@ -5,27 +5,35 @@ use parser::mft::{
     parse_file_record_header, parse_attributes, parse_non_resident_header, 
     parse_runlist, parse_index_entries, parse_index_record
 };
+use std::collections::HashMap;
 
-pub struct NtfsFileSystem<'a> {
-    pub mft: &'a mut MftReader,
+pub struct NtfsFileSystem {
+    pub mft: MftReader,
+    dir_cache: HashMap<u64, Vec<IndexEntry>>,
 }
 
-impl<'a> NtfsFileSystem<'a> {
-    pub fn new(mft: &'a mut MftReader) -> Self {
-        Self { mft }
+impl NtfsFileSystem {
+    pub fn new(mft: MftReader) -> Self {
+        Self { mft, dir_cache: HashMap::with_capacity(1024) }
     }
 
     pub fn list_directory(&mut self, dir_index: u64) -> Result<Vec<IndexEntry>> {
+        if let Some(cached) = self.dir_cache.get(&dir_index) {
+            return Ok(cached.clone());
+        }
+
         let mut entries = Vec::new();
         let mut queue = vec![dir_index];
         let mut seen = std::collections::HashSet::new();
         
         while let Some(idx) = queue.pop() {
             if !seen.insert(idx) { continue; }
+            
             let data = match self.mft.read_record(idx) { 
                 Ok(d) => d, 
-                Err(e) => { tracing::warn!("      [!] Failed to read dir inode {}: {}", idx, e); continue; } 
+                Err(_) => continue 
             };
+            
             let head = match parse_file_record_header(&data) { Ok(h) => h, Err(_) => continue };
             
             for attr in parse_attributes(&data, &head).unwrap_or_default() {
@@ -78,8 +86,7 @@ impl<'a> NtfsFileSystem<'a> {
                             if rd.len() >= 32 {
                                 let first_entry = u32::from_le_bytes([rd[16], rd[17], rd[18], rd[19]]) as usize;
                                 if 16 + first_entry < rd.len() {
-                                    let entries_data = &rd[16 + first_entry..];
-                                    if let Ok(p) = parse_index_entries(entries_data) { entries.extend(p); }
+                                    if let Ok(p) = parse_index_entries(&rd[16 + first_entry..]) { entries.extend(p); }
                                 }
                             }
                         }
@@ -90,14 +97,12 @@ impl<'a> NtfsFileSystem<'a> {
                             let end = std::cmp::min(attr.offset + attr.length as usize, data.len());
                             if start <= end {
                                 if let Ok(runs) = parse_runlist(&data[start..end]) {
-                                    if let Ok(id) = self.mft.read_data_from_runlist(&runs, u64::MAX) {
+                                    if let Ok(id) = self.mft.read_data_from_runlist(&runs, nr.real_size) {
                                         for chunk in id.chunks(4096) { 
                                             if chunk.len() < 4096 { continue; }
                                             let mut fixed_chunk = chunk.to_vec();
                                             let _ = apply_fixup(&mut fixed_chunk);
-                                            if let Ok(p) = parse_index_record(&fixed_chunk) {
-                                                entries.extend(p);
-                                            }
+                                            if let Ok(p) = parse_index_record(&fixed_chunk) { entries.extend(p); }
                                         }
                                     }
                                 }
@@ -108,28 +113,20 @@ impl<'a> NtfsFileSystem<'a> {
                 }
             }
         }
+        self.dir_cache.insert(dir_index, entries.clone());
         Ok(entries)
     }
 
     pub fn get_inode_by_path(&mut self, path: &str) -> Result<u64> {
-        // [Fix] ADS 식별자 ':'가 포함되어 있다면 순수 파일명만 분리
         let clean_path = path.split(':').next().unwrap_or(path);
         let parts: Vec<&str> = clean_path.split('\\').filter(|p| !p.is_empty()).collect();
         let mut cur = 5;
-        
         for (i, part) in parts.iter().enumerate() {
             if i == 0 && part.eq_ignore_ascii_case("$Extend") { cur = 11; continue; }
             let entries = self.list_directory(cur)?;
-            let mut found = false;
-            
-            for e in entries {
-                if e.filename.trim_matches(char::from(0)).trim().eq_ignore_ascii_case(part) {
-                    cur = e.file_reference;
-                    found = true;
-                    break;
-                }
-            }
-            if !found { bail!("Path component '{}' not found in Parent Inode {}", part, cur); }
+            if let Some(e) = entries.iter().find(|e| e.filename.trim_matches(char::from(0)).trim().eq_ignore_ascii_case(part)) {
+                cur = e.file_reference;
+            } else { bail!("Path not found: {}", part); }
         }
         Ok(cur)
     }

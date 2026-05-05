@@ -11,7 +11,11 @@ windows = { version = "0.58", features = [
     "Win32_System_ProcessStatus", 
     "Win32_System_Threading",
     "Win32_Security",
-    "Win32_Storage_FileSystem"
+    "Win32_Storage_FileSystem",
+    "Win32_System_Memory",      # [추가] VirtualAlloc, VirtualFree (AlignedBuffer Zero-copy 파싱용)
+    "Win32_System_IO",          # [추가] DeviceIoControl (볼륨 제어용)
+    "Win32_System_Ioctl"        # [추가] FSCTL_ALLOW_EXTENDED_DASD_IO (파티션 읽기 경계 해제용)
 ] }
 anyhow = "1.0"
 tracing = "0.1"
+memchr = "2.7"                  # [추가] SIMD 기반 초고속 바이트 스캔 (FILE0 시그니처 Pre-filter용)
