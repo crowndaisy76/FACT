@@ -968,6 +968,7 @@ dependencies = [
  "chrono",
  "evtx 0.8.5",
  "models",
+ "rayon",
  "roxmltree",
  "serde",
  "serde_json",

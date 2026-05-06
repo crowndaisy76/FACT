@@ -8,8 +8,12 @@ pub fn parse_file_record_header(data: &[u8]) -> Result<FileRecordHeader, FactErr
     if data.len() < 48 { 
         return Err(FactError::ParseError { artifact_name: "MFT".into(), details: "Data too small".into() }); 
     }
+
+    let mut signature = [0u8; 4];
+    signature.copy_from_slice(&data[0..4]);
+
     Ok(FileRecordHeader {
-        signature: String::from_utf8_lossy(&data[0..4]).to_string(),
+        signature,
         usa_offset: u16::from_le_bytes([data[4], data[5]]),
         usa_count: u16::from_le_bytes([data[6], data[7]]),
         lsn: u64::from_le_bytes(data[8..16].try_into().unwrap()),
@@ -24,6 +28,37 @@ pub fn parse_file_record_header(data: &[u8]) -> Result<FileRecordHeader, FactErr
     })
 }
 
+pub fn apply_fixup(data: &mut [u8], header: &FileRecordHeader, sector_size: usize) -> Result<(), FactError> {
+    let usa_offset = header.usa_offset as usize;
+    let usa_count = header.usa_count as usize;
+
+    if usa_offset + 2 > data.len() || usa_offset + (usa_count * 2) > data.len() {
+        return Err(FactError::ParseError { artifact_name: "MFT".into(), details: "Invalid USA offset/count".into() });
+    }
+
+    let usn = [data[usa_offset], data[usa_offset + 1]];
+    let usa_array_offset = usa_offset + 2;
+
+    for i in 1..usa_count {
+        let sector_end = (i * sector_size) - 2;
+        
+        if sector_end + 2 > data.len() { break; }
+
+        if data[sector_end] != usn[0] || data[sector_end + 1] != usn[1] {
+            return Err(FactError::ParseError { 
+                artifact_name: "MFT".into(), 
+                details: format!("Fixup validation failed at sector {}", i) 
+            });
+        }
+
+        let original_byte_offset = usa_array_offset + ((i - 1) * 2);
+        data[sector_end] = data[original_byte_offset];
+        data[sector_end + 1] = data[original_byte_offset + 1];
+    }
+    
+    Ok(())
+}
+
 pub fn parse_attributes(data: &[u8], header: &FileRecordHeader) -> Result<Vec<AttributeHeader>, FactError> {
     let mut attributes = Vec::new();
     let mut current_offset = header.attr_offset as usize;
@@ -34,6 +69,10 @@ pub fn parse_attributes(data: &[u8], header: &FileRecordHeader) -> Result<Vec<At
 
         let length = u32::from_le_bytes(data[current_offset+4..current_offset+8].try_into().unwrap()) as usize;
         if length < 16 || current_offset + length > data.len() { break; }
+
+        if type_code == 0x20 {
+            // 트리거 구간: 자식 속성 병합 로직 호출
+        }
 
         attributes.push(AttributeHeader {
             type_code,
@@ -85,7 +124,6 @@ pub fn parse_runlist(data: &[u8]) -> Result<Vec<DataRun>, FactError> {
             let mut offset: i64 = 0;
             for i in 0..off_bytes { offset |= (data[cursor+i] as i64) << (i * 8); }
             
-            // [Ultimate Fix] 런리스트 음수 점프 버그 완벽 패치 (Sign Extension)
             let shift_bits = 64 - (off_bytes * 8);
             if shift_bits < 64 {
                 offset = (offset << shift_bits) >> shift_bits;
@@ -160,6 +198,7 @@ impl BootSector {
     pub fn cluster_size(&self) -> u64 { (self.bytes_per_sector as u64) * (self.sectors_per_cluster as u64) }
     pub fn mft_offset(&self) -> u64 { self.mft_lcn * self.cluster_size() }
 }
+
 pub fn parse_boot_sector_manual(data: &[u8]) -> Result<BootSector, FactError> {
     if data.len() < 512 { return Err(FactError::ParseError { artifact_name: "VBR".into(), details: "Too small".into() }); }
     Ok(BootSector { 

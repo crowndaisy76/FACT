@@ -2,10 +2,9 @@ use binrw::BinRead;
 use std::fmt;
 use chrono::{DateTime, Utc, TimeZone};
 
-// [Fix] 패딩 및 정렬 에러 방지를 위해 핵심 헤더에서 BinRead 제거
 #[derive(Debug, Clone)]
 pub struct FileRecordHeader {
-    pub signature: String, 
+    pub signature: [u8; 4],
     pub usa_offset: u16,
     pub usa_count: u16,
     pub lsn: u64,
@@ -19,6 +18,12 @@ pub struct FileRecordHeader {
     pub next_attr_id: u16,
 }
 
+impl FileRecordHeader {
+    pub fn signature_str(&self) -> String {
+        String::from_utf8_lossy(&self.signature).to_string()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AttributeHeader {
     pub type_code: u32,
@@ -28,7 +33,7 @@ pub struct AttributeHeader {
     pub name_offset: u16,
     pub flags: u16,
     pub attribute_id: u16,
-    pub offset: usize, // [Fix] 속성의 절대 오프셋 보장
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -119,14 +124,13 @@ pub struct IndexEntry {
     pub stream_length: u16,
     pub flags: u8,
     pub filename: String,
-    pub is_directory: bool, // [Fix] 디렉토리 식별자 완벽 분리
+    pub is_directory: bool,
 }
 
 #[derive(BinRead, Debug, Clone)]
 #[br(little)]
 pub struct IndexRecordHeader {
-    #[br(map = |x: [u8; 4]| String::from_utf8_lossy(&x).to_string())]
-    pub signature: String,
+    pub signature: [u8; 4],
     pub usa_offset: u16,
     pub usa_count: u16,
     pub lsn: u64,

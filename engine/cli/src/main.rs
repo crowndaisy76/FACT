@@ -55,6 +55,8 @@ fn main() -> Result<()> {
 
     let all_raw_events: Vec<ForensicEvent> = measure_perf!("Phase_2_Parallel_Collection", {
         targets.into_par_iter().flat_map(|target| {
+            // [고도화 추가] 개별 스레드의 처리 시간을 측정하기 위한 타이머 시작
+            let thread_start = Instant::now();
             let mut thread_events = Vec::new();
             let t_mft = master_mft.clone_reader().expect("Clone fail");
             let mut collector = ForensicCollector::new(NtfsFileSystem::new(t_mft));
@@ -108,6 +110,11 @@ fn main() -> Result<()> {
             });
             
             if let Err(e) = collect_res { tracing::error!("  [!] Thread Error for {:?}: {}", target, e); }
+            
+            // [고도화 추가] 스레드 처리가 완전히 끝난 시점에 소요 시간 로깅
+            let elapsed = thread_start.elapsed();
+            tracing::info!("[PERF_METRIC] [Thread_{:?}] 소요 시간: {}.{:06} sec", target, elapsed.as_secs(), elapsed.subsec_micros());
+
             thread_events
         }).collect()
     });

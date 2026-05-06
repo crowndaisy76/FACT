@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone)]
 pub struct RegistryValue {
@@ -6,6 +6,7 @@ pub struct RegistryValue {
     pub data_type: u32,
     pub data_string: String,
     pub data_raw: Vec<u8>,
+    pub is_deleted: bool, // [고도화] 삭제된 값 여부 추적
 }
 
 pub struct HiveParser<'a> {
@@ -20,12 +21,35 @@ impl<'a> HiveParser<'a> {
         Ok(Self { data })
     }
 
+    // [고도화] 트랜잭션 로그(.log) In-memory Replay (Dirty Hive 복구용)
+    pub fn apply_transaction_logs(hive_data: &mut [u8], log_data: &[u8]) -> Result<()> {
+        if log_data.len() < 4096 || &log_data[0..4] != b"regf" {
+            bail!("Invalid Log File");
+        }
+        // 하이브 헤더의 시퀀스 번호와 로그의 시퀀스 번호를 대조하여 더티(Dirty) 상태인지 확인 후,
+        // 로그의 Bin 데이터를 원본 hive_data의 해당 오프셋에 직접 덮어씌움 (Zero-Copy 제자리 복구)
+        // (실제 Replay 알고리즘 구현부 - 구조상 틀만 잡아둠)
+        Ok(())
+    }
+
+    #[inline]
     fn abs_offset(&self, offset: u32) -> usize {
         (4096 + offset) as usize
     }
 
     pub fn get_root_offset(&self) -> u32 {
         u32::from_le_bytes(self.data[0x24..0x28].try_into().unwrap())
+    }
+
+    // [고도화] 셀(Cell) 할당 상태 판별: 음수면 사용 중, 양수면 삭제됨(Free)
+    fn is_cell_allocated(&self, offset: u32) -> bool {
+        let abs_off = self.abs_offset(offset);
+        if abs_off + 4 <= self.data.len() {
+            let size_val = i32::from_le_bytes(self.data[abs_off..abs_off+4].try_into().unwrap());
+            size_val < 0 // 음수일 때 Allocated
+        } else {
+            false
+        }
     }
 
     pub fn get_key_name(&self, nk_offset: u32) -> String {
@@ -53,7 +77,6 @@ impl<'a> HiveParser<'a> {
         }
     }
 
-    /// [Industry Standard] 특정 노드(nk) 하위에서 원하는 이름(target_name)을 가진 자식만 초고속으로 찾아낸다.
     pub fn find_child(&self, nk_offset: u32, target_name: &str) -> Option<u32> {
         let data_start = self.abs_offset(nk_offset) + 4;
         if data_start + 76 > self.data.len() { return None; }
@@ -67,7 +90,6 @@ impl<'a> HiveParser<'a> {
         self.search_list(list_offset, target_name)
     }
 
-    /// 리스트(li, ri, lh, lf) 내부를 직접 재귀 탐색하여 타겟을 사냥한다.
     fn search_list(&self, list_offset: u32, target_name: &str) -> Option<u32> {
         let list_start = self.abs_offset(list_offset) + 4;
         if list_start + 4 > self.data.len() { return None; }
@@ -78,7 +100,7 @@ impl<'a> HiveParser<'a> {
 
         if sig == b"lf" || sig == b"lh" {
             for i in 0..count {
-                let off = elements_start + (i * 8); // lf/lh는 엘리먼트가 8바이트 (앞 4바이트가 오프셋)
+                let off = elements_start + (i * 8); 
                 if off + 4 <= self.data.len() {
                     let nk_off = u32::from_le_bytes(self.data[off..off+4].try_into().unwrap());
                     if self.get_key_name(nk_off).eq_ignore_ascii_case(target_name) {
@@ -88,7 +110,7 @@ impl<'a> HiveParser<'a> {
             }
         } else if sig == b"li" {
             for i in 0..count {
-                let off = elements_start + (i * 4); // li는 엘리먼트가 4바이트
+                let off = elements_start + (i * 4);
                 if off + 4 <= self.data.len() {
                     let nk_off = u32::from_le_bytes(self.data[off..off+4].try_into().unwrap());
                     if self.get_key_name(nk_off).eq_ignore_ascii_case(target_name) {
@@ -96,7 +118,7 @@ impl<'a> HiveParser<'a> {
                     }
                 }
             }
-        } else if sig == b"ri" { // 거대 트리의 핵심: Root Index 재귀 탐색
+        } else if sig == b"ri" { 
             for i in 0..count {
                 let off = elements_start + (i * 4);
                 if off + 4 <= self.data.len() {
@@ -110,7 +132,6 @@ impl<'a> HiveParser<'a> {
         None
     }
 
-    /// 전체 경로를 입력받아 계층적으로(Tree-Walking) 최종 키 오프셋을 찾는다.
     pub fn find_key(&self, path: &str) -> Option<u32> {
         let parts: Vec<&str> = path.split('\\').filter(|p| !p.is_empty()).collect();
         let mut current_offset = self.get_root_offset();
@@ -190,6 +211,10 @@ impl<'a> HiveParser<'a> {
         for i in 0..val_count as usize {
             let off = list_start + (i * 4);
             let vk_off = u32::from_le_bytes(self.data[off..off+4].try_into().unwrap());
+            
+            // [고도화] 셀 오프셋을 통해 할당 상태(삭제 여부) 확인
+            let is_deleted = !self.is_cell_allocated(vk_off);
+            
             let vk_start = self.abs_offset(vk_off) + 4;
 
             if vk_start + 20 <= self.data.len() && &self.data[vk_start..vk_start+2] == b"vk" {
@@ -235,11 +260,11 @@ impl<'a> HiveParser<'a> {
 
                     if data_bytes.is_empty() {
                         "".to_string()
-                    } else if data_type == 1 || data_type == 2 || data_type == 7 { // REG_SZ 계열
+                    } else if data_type == 1 || data_type == 2 || data_type == 7 { 
                         let u16_data: Vec<u16> = data_bytes.chunks_exact(2)
                             .map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
                         String::from_utf16_lossy(&u16_data).replace('\0', "").trim().to_string()
-                    } else if data_type == 4 && data_bytes.len() >= 4 { // REG_DWORD
+                    } else if data_type == 4 && data_bytes.len() >= 4 { 
                         let dword = u32::from_le_bytes(data_bytes[0..4].try_into().unwrap());
                         format!("0x{:08X}", dword)
                     } else {
@@ -247,9 +272,47 @@ impl<'a> HiveParser<'a> {
                     }
                 } else { "".to_string() };
 
-                vals.push(RegistryValue { name, data_type, data_string, data_raw });
+                vals.push(RegistryValue { name, data_type, data_string, data_raw, is_deleted });
             }
         }
         vals
+    }
+    
+    // [고도화] 하이브 Bin 영역을 스캔하여 삭제된 모든 키(NK) 추출
+    pub fn scan_deleted_keys(&self) -> Vec<u32> {
+        let mut deleted_offsets = Vec::new();
+        let mut current_offset = 4096; // 첫 번째 Bin 시작점
+        
+        while current_offset < self.data.len() {
+            if current_offset + 32 > self.data.len() { break; }
+            
+            // hbin 시그니처 확인
+            if &self.data[current_offset..current_offset+4] == b"hbin" {
+                let bin_size = u32::from_le_bytes(self.data[current_offset+8..current_offset+12].try_into().unwrap()) as usize;
+                let mut cell_offset = current_offset + 32;
+                let bin_end = current_offset + bin_size;
+                
+                while cell_offset < bin_end && cell_offset + 4 <= self.data.len() {
+                    let cell_size_raw = i32::from_le_bytes(self.data[cell_offset..cell_offset+4].try_into().unwrap());
+                    if cell_size_raw == 0 { break; }
+                    
+                    let is_unallocated = cell_size_raw > 0;
+                    let actual_size = cell_size_raw.abs() as usize;
+                    
+                    if is_unallocated && cell_offset + 6 <= self.data.len() {
+                        // 삭제된 셀 중 NK(Name Key) 식별
+                        if &self.data[cell_offset+4..cell_offset+6] == b"nk" {
+                            // abs_offset 계산을 위한 상대 오프셋으로 변환하여 저장
+                            deleted_offsets.push((cell_offset - 4096) as u32);
+                        }
+                    }
+                    cell_offset += actual_size;
+                }
+                current_offset += bin_size;
+            } else {
+                break;
+            }
+        }
+        deleted_offsets
     }
 }
