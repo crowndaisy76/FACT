@@ -47,7 +47,7 @@ impl ArtifactAnalyzer for RegistryAnalyzer {
                             persistence_type: desc.to_string(),
                             target_name: val.name,
                             target_path: val.data_string,
-                            payload: String::new(), // 에러 수정
+                            payload: String::new(), 
                             source_artifact: format!("SOFTWARE\\{}", path),
                         }));
                     }
@@ -57,7 +57,7 @@ impl ArtifactAnalyzer for RegistryAnalyzer {
             }
         }
 
-        // 2. SYSTEM
+        // 2. SYSTEM (ServiceDll 은닉 파훼 및 수동 시작 탐지 고도화)
         if filename.eq_ignore_ascii_case("SYSTEM") {
             if let Some(services_off) = parser.find_key("ControlSet001\\Services") {
                 let subkeys = parser.get_subkeys(services_off);
@@ -65,30 +65,56 @@ impl ArtifactAnalyzer for RegistryAnalyzer {
                     let service_name = parser.get_key_name(sk);
                     let values = parser.get_values(sk);
                     
-                    let mut is_auto_start = false;
+                    let mut start_type_val: Option<u32> = None;
                     let mut image_path = String::new();
+                    
                     for val in values {
                         if val.name.eq_ignore_ascii_case("Start") {
                             if val.data_raw.len() >= 4 {
-                                let start_type = u32::from_le_bytes(val.data_raw[0..4].try_into().unwrap());
-                                if start_type == 2 {
-                                    is_auto_start = true;
-                                }
+                                let st = u32::from_le_bytes(val.data_raw[0..4].try_into().unwrap());
+                                start_type_val = Some(st);
                             }
                         }
                         if val.name.eq_ignore_ascii_case("ImagePath") {
                             image_path = val.data_string.clone();
                         }
                     }
-                    if is_auto_start && !image_path.is_empty() {
-                        events.push(ForensicEvent::Persistence(PersistenceEvent {
-                            timestamp: Utc::now(),
-                            persistence_type: "System Service (Auto-Start)".to_string(),
-                            target_name: service_name,
-                            target_path: image_path,
-                            payload: String::new(), // 에러 수정
-                            source_artifact: "SYSTEM\\ControlSet001\\Services".to_string(),
-                        }));
+                    
+                    // Start == 2 (Auto), Start == 3 (Manual/Demand)
+                    if let Some(st) = start_type_val {
+                        if (st == 2 || st == 3) && !image_path.is_empty() {
+                            let mut final_path = image_path.clone();
+                            
+                            // svchost.exe 등 호스트 프로세스를 사용할 경우 Parameters\\ServiceDll 추출
+                            if final_path.to_lowercase().contains("svchost.exe") {
+                                let srv_subkeys = parser.get_subkeys(sk);
+                                for param_sk in srv_subkeys {
+                                    if parser.get_key_name(param_sk).eq_ignore_ascii_case("Parameters") {
+                                        let param_values = parser.get_values(param_sk);
+                                        for pval in param_values {
+                                            if pval.name.eq_ignore_ascii_case("ServiceDll") {
+                                                final_path = format!("{} [ServiceDll: {}]", final_path, pval.data_string);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            let persist_type = if st == 2 {
+                                "System Service (Auto-Start)"
+                            } else {
+                                "System Service (Manual-Start)"
+                            };
+                            
+                            events.push(ForensicEvent::Persistence(PersistenceEvent {
+                                timestamp: Utc::now(),
+                                persistence_type: persist_type.to_string(),
+                                target_name: service_name,
+                                target_path: final_path,
+                                payload: String::new(), 
+                                source_artifact: "SYSTEM\\ControlSet001\\Services".to_string(),
+                            }));
+                        }
                     }
                 }
             }

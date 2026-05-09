@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail}; // Context 제거하여 경고 해결
 
 #[derive(Debug, Clone)]
 pub struct RegistryValue {
@@ -22,8 +22,9 @@ impl<'a> HiveParser<'a> {
     }
 
     // [고도화] 트랜잭션 로그(.log) In-memory Replay (Dirty Hive 복구용)
-    pub fn apply_transaction_logs(hive_data: &mut [u8], log_data: &[u8]) -> Result<()> {
-        if log_data.len() < 4096 || &log_data[0..4] != b"regf" {
+    // 미사용 변수 경고 해결을 위해 파라미터에 _ 접두사 추가
+    pub fn apply_transaction_logs(_hive_data: &mut [u8], _log_data: &[u8]) -> Result<()> {
+        if _log_data.len() < 4096 || &_log_data[0..4] != b"regf" {
             bail!("Invalid Log File");
         }
         // 하이브 헤더의 시퀀스 번호와 로그의 시퀀스 번호를 대조하여 더티(Dirty) 상태인지 확인 후,

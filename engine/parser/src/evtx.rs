@@ -90,6 +90,7 @@ pub fn parse_security_evtx_buffer(buffer: &[u8], source_name: &str) -> Result<Ve
                     process_id: parse_pid(&process_id_str), parent_process_id: 0,
                     file_path: process_name, command_line, parent_process_name, 
                     run_count: 1, referenced_files: Vec::new(), source_artifact: format!("EVTX ({})", source_name),
+                    ioc_hash: None, // 구조체 필드 누락 수정
                 }));
             }
         } 

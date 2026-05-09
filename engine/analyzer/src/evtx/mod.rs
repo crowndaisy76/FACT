@@ -9,6 +9,25 @@ pub struct EvtxAnalyzer;
 
 impl EvtxAnalyzer {
     pub fn new() -> Self { Self {} }
+
+    // PowerShell Base64 인코딩 페이로드 추출 헬퍼 (난독화 파훼)
+    fn extract_encoded_payload(script: &str) -> Option<String> {
+        let lower_script = script.to_lowercase();
+        let keywords = ["-encodedcommand", "-enc", "-e "];
+        
+        for keyword in keywords {
+            if let Some(idx) = lower_script.find(keyword) {
+                let payload_start = script[idx + keyword.len()..].trim_start();
+                let end_idx = payload_start.find(|c: char| c.is_whitespace()).unwrap_or(payload_start.len());
+                let base64_payload = &payload_start[..end_idx];
+                
+                if base64_payload.len() > 10 {
+                    return Some(base64_payload.to_string());
+                }
+            }
+        }
+        None
+    }
 }
 
 impl ArtifactAnalyzer for EvtxAnalyzer {
@@ -71,9 +90,9 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                             if !account.ends_with('$') && account != "Unknown" {
                                 events.push(ForensicEvent::Logon(LogonEvent {
                                     timestamp,
-                                    user_name: account.to_string(), // 에러 수정
+                                    user_name: account.to_string(),
                                     logon_type: logon_type.parse().unwrap_or(0),
-                                    source_ip: ip.to_string(),      // 에러 수정
+                                    source_ip: ip.to_string(),
                                     source_artifact: filename.to_string(),
                                 }));
                             }
@@ -88,7 +107,7 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                             persistence_type: "New Service Installed".to_string(),
                             target_name: service_name.to_string(),
                             target_path: image_path.to_string(),
-                            payload: String::new(), // 에러 수정
+                            payload: String::new(),
                             source_artifact: filename.to_string(),
                         }));
                     },
@@ -99,7 +118,7 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                             persistence_type: "Scheduled Task Registered".to_string(),
                             target_name: task_name.to_string(),
                             target_path: "Check Task XML for Payload".to_string(),
-                            payload: String::new(), // 에러 수정
+                            payload: String::new(),
                             source_artifact: filename.to_string(),
                         }));
                     },
@@ -138,23 +157,29 @@ impl ArtifactAnalyzer for EvtxAnalyzer {
                         events.push(ForensicEvent::Execution(ExecutionEvent {
                             timestamp,
                             process_name: proc_name.to_string(),
-                            process_id: 0,          // 에러 수정
-                            parent_process_id: 0,   // 에러 수정
+                            process_id: 0,
+                            parent_process_id: 0,
                             file_path: proc_name.to_string(),
                             command_line: cmd_line.to_string(), 
                             parent_process_name: parent_proc.to_string(),
                             run_count: 1,
                             referenced_files: vec![],
                             source_artifact: filename.to_string(),
+                            ioc_hash: None, // [고도화 반영] 컴파일 에러 수정
                         }));
                     },
                     4104 => { 
                         let script = event_data["ScriptBlockText"].as_str().unwrap_or("");
                         if !script.is_empty() {
+                            let mut description = format!("Script executed (Length: {})", script.len());
+                            if let Some(encoded) = Self::extract_encoded_payload(script) {
+                                description = format!("Obfuscated PowerShell Detected. Base64 Payload: {}", encoded);
+                            }
+
                             events.push(ForensicEvent::SystemActivity(SystemEvent {
                                 timestamp,
                                 activity_type: "PowerShell Script Block".to_string(),
-                                description: format!("Script executed: {}...", &script.chars().take(100).collect::<String>()),
+                                description: format!("{} | Content: {}", description, script), 
                                 source_artifact: filename.to_string(),
                             }));
                         }

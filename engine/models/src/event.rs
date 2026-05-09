@@ -15,14 +15,16 @@ pub enum ForensicEvent {
 pub struct ExecutionEvent {
     pub timestamp: DateTime<Utc>,
     pub process_name: String,
-    pub process_id: u32,             // Step 4: 프로세스 ID 추가
-    pub parent_process_id: u32,      // Step 4: 부모 프로세스 ID 추가
+    pub process_id: u32,
+    pub parent_process_id: u32,
     pub file_path: String,
     pub command_line: String,
     pub parent_process_name: String,
     pub run_count: u32,
     pub referenced_files: Vec<String>,
     pub source_artifact: String,
+    // [추가] CTI 연동 및 초고속 인덱싱을 위한 전용 IoC 해시 필드 독립
+    pub ioc_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +41,7 @@ pub struct FileSystemEvent {
 pub struct PersistenceEvent {
     pub timestamp: DateTime<Utc>,
     pub persistence_type: String, 
-    pub target_name: String,         // 파서 호환성을 위한 필드
+    pub target_name: String,
     pub target_path: String,
     pub payload: String,
     pub source_artifact: String,

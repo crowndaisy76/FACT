@@ -55,7 +55,6 @@ fn main() -> Result<()> {
 
     let all_raw_events: Vec<ForensicEvent> = measure_perf!("Phase_2_Parallel_Collection", {
         targets.into_par_iter().flat_map(|target| {
-            // [고도화 추가] 개별 스레드의 처리 시간을 측정하기 위한 타이머 시작
             let thread_start = Instant::now();
             let mut thread_events = Vec::new();
             let t_mft = master_mft.clone_reader().expect("Clone fail");
@@ -70,10 +69,16 @@ fn main() -> Result<()> {
                         if let Ok(info) = parser::prefetch::parse_prefetch_info(data) {
                             thread_events.push(ForensicEvent::Execution(ExecutionEvent {
                                 timestamp: info.last_run_times.first().copied().unwrap_or_else(Utc::now),
-                                process_name: info.executable_name, process_id: 0, parent_process_id: 0,
-                                file_path: filename.to_string(), command_line: String::new(), 
-                                parent_process_name: String::new(), run_count: info.run_count, 
-                                referenced_files: info.referenced_files, source_artifact: format!("Prefetch ({})", filename),
+                                process_name: info.executable_name, 
+                                process_id: 0, 
+                                parent_process_id: 0,
+                                file_path: filename.to_string(), 
+                                command_line: String::new(), 
+                                parent_process_name: String::new(), 
+                                run_count: info.run_count, 
+                                referenced_files: info.referenced_files, 
+                                source_artifact: format!("Prefetch ({})", filename),
+                                ioc_hash: None, // [에러 수정] 필드 추가
                             }));
                         }
                     },
@@ -87,10 +92,19 @@ fn main() -> Result<()> {
                         if let Ok(recs) = parser::amcache::parse_amcache_carve(data) {
                             for r in recs {
                                 thread_events.push(ForensicEvent::Execution(ExecutionEvent {
-                                    timestamp: Utc::now(), process_name: r.file_path.split('\\').last().unwrap_or("Unknown").to_string(),
-                                    process_id: 0, parent_process_id: 0, file_path: format!("{} [SHA1: {}]", r.file_path, r.sha1),
-                                    command_line: String::new(), parent_process_name: String::new(), run_count: 1, 
-                                    referenced_files: vec![], source_artifact: "Amcache.hve".to_string(),
+                                    timestamp: Utc::now(), 
+                                    process_name: r.file_path.split('\\').last().unwrap_or("Unknown").to_string(),
+                                    process_id: 0, 
+                                    parent_process_id: 0, 
+                                    // [고도화] 텍스트 래핑 제거 및 순수 경로 보존
+                                    file_path: r.file_path,
+                                    command_line: String::new(), 
+                                    parent_process_name: String::new(), 
+                                    run_count: 1, 
+                                    referenced_files: vec![], 
+                                    source_artifact: "Amcache.hve".to_string(),
+                                    // [고도화] 전용 필드에 해시 매핑
+                                    ioc_hash: Some(r.sha1), 
                                 }));
                             }
                         }
@@ -102,7 +116,7 @@ fn main() -> Result<()> {
                         if let Ok(mut evs) = parser::wmi::parse_wmi_carve(data, filename) { thread_events.append(&mut evs); }
                     },
                     ArtifactTarget::RegistrySYSTEM => {
-                        if let Ok(mut evs) = parser::system_hive::parse_system_services(data, filename) { thread_events.append(&mut evs); }
+                        // 고도화된 RegistryAnalyzer의 로직을 타기 위해 process_stream 호출 위주로 통합
                         thread_events.append(&mut analyzer.process_stream(&target, filename, data));
                     },
                     _ => { thread_events.append(&mut analyzer.process_stream(&target, filename, data)); }
@@ -111,7 +125,6 @@ fn main() -> Result<()> {
             
             if let Err(e) = collect_res { tracing::error!("  [!] Thread Error for {:?}: {}", target, e); }
             
-            // [고도화 추가] 스레드 처리가 완전히 끝난 시점에 소요 시간 로깅
             let elapsed = thread_start.elapsed();
             tracing::info!("[PERF_METRIC] [Thread_{:?}] 소요 시간: {}.{:06} sec", target, elapsed.as_secs(), elapsed.subsec_micros());
 

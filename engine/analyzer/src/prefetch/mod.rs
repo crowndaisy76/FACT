@@ -33,6 +33,7 @@ impl ArtifactAnalyzer for PrefetchAnalyzer {
                         run_count: info.run_count,
                         referenced_files: info.referenced_files.clone(), 
                         source_artifact: "Prefetch".to_string(),
+                        ioc_hash: None, // [고도화 반영] 컴파일 에러 수정
                     });
                     events.push(event);
                 }

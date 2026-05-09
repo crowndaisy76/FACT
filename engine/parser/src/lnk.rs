@@ -34,5 +34,6 @@ pub fn parse_lnk_carve(data: &[u8], source_name: &str) -> Result<Vec<ForensicEve
         run_count: 1,
         referenced_files: Vec::new(),
         source_artifact: format!("LNK ({})", source_name),
+        ioc_hash: None, // 구조체 필드 누락 수정
     })])
 }
